@@ -24,6 +24,7 @@ fn tools_with(mock: &Arc<MockDriver>) -> Tools {
             idle_after: Duration::from_secs(60),
             token_present: true,
         },
+        std::env::temp_dir().join("bamburino-tests-unused"),
     )
 }
 

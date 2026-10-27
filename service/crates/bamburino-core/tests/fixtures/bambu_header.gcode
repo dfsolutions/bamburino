@@ -8,6 +8,7 @@
 ; filament_density: 1.24,1.24
 ; filament_diameter: 1.75,1.75
 ; max_z_height: 20.00
+; filament: 1,3
 ; HEADER_BLOCK_END
 
 ; CONFIG_BLOCK_START

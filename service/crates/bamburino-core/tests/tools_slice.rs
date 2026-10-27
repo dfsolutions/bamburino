@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #![cfg(feature = "mock")]
 
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bamburino_core::detect::FixedProcessProbe;
@@ -12,6 +14,10 @@ use bamburino_core::tools::{JobArgs, SliceArgs, SummaryArgs, ToolConfig, Tools};
 use serde_json::Value;
 
 fn tools_with(mock: &Arc<MockDriver>) -> Tools {
+    tools_in(mock, test_dir())
+}
+
+fn tools_in(mock: &Arc<MockDriver>, dir: PathBuf) -> Tools {
     Tools::new(
         mock.clone(),
         Arc::new(FixedProcessProbe(true)),
@@ -21,7 +27,21 @@ fn tools_with(mock: &Arc<MockDriver>) -> Tools {
             idle_after: Duration::from_secs(60),
             token_present: true,
         },
+        dir,
     )
+}
+
+/// A fresh export directory per test (the production one is created by the
+/// installer; the service does not create it).
+fn test_dir() -> PathBuf {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join("bamburino-tests").join(format!(
+        "{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::SeqCst)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
 }
 
 fn slice_args(plate: Option<u32>) -> SliceArgs {
@@ -193,18 +213,18 @@ async fn summary_after_slice_has_time_and_grams() {
 }
 
 #[tokio::test]
-async fn summary_export_goes_to_bamburino_temp_dir() {
+async fn summary_export_goes_to_the_injected_export_dir() {
     let mock = Arc::new(MockDriver::new());
     mock.set_summary_stats(None, two_filaments(), None);
-    let t = tools_with(&mock);
+    let dir = test_dir();
+    let t = tools_in(&mock, dir.clone());
     slice_to_done(&t).await;
     t.studio_get_slice_summary(summary_args(None))
         .await
         .unwrap();
     let paths = mock.exported_paths();
     assert_eq!(paths.len(), 1);
-    let expected_dir = std::env::temp_dir().join("bamburino");
-    assert_eq!(paths[0].parent().unwrap(), expected_dir.as_path());
+    assert_eq!(paths[0].parent().unwrap(), dir.as_path());
     assert_eq!(paths[0].extension().unwrap(), "gcode");
 }
 
@@ -409,4 +429,119 @@ async fn persistent_stale_reference_is_a_conflict() {
     let e = t.studio_slice(slice_args(None)).await.unwrap_err();
     assert_eq!(e.code, ToolErrorCode::RevisionConflict);
     assert_eq!(count(&mock, "slice_start"), 2);
+}
+
+#[tokio::test]
+async fn ids_come_from_the_header_not_the_position() {
+    // A plate using slots 1 and 3 (0-based); slot 2 is unused (0 g), so the
+    // header lists two values and `; filament: 1,3`.
+    let mock = Arc::new(MockDriver::new());
+    mock.set_summary_stats(
+        None,
+        vec![
+            FilamentUsage {
+                index: 0,
+                grams: Some(0.0),
+                meters: Some(0.0),
+            },
+            FilamentUsage {
+                index: 1,
+                grams: Some(12.34),
+                meters: Some(4.5),
+            },
+            FilamentUsage {
+                index: 2,
+                grams: Some(0.0),
+                meters: Some(0.0),
+            },
+            FilamentUsage {
+                index: 3,
+                grams: Some(0.5),
+                meters: Some(0.2),
+            },
+        ],
+        None,
+    );
+    let t = tools_with(&mock);
+    slice_to_done(&t).await;
+    let s = t
+        .studio_get_slice_summary(summary_args(None))
+        .await
+        .unwrap();
+    let f = s["filaments"].as_array().unwrap();
+    assert_eq!(f.len(), 2, "{f:?}");
+    assert_eq!(f[0]["index"], 1);
+    assert_eq!(f[0]["grams"], 12.34);
+    assert_eq!(f[1]["index"], 3);
+    assert_eq!(f[1]["grams"], 0.5);
+    assert_eq!(f[1]["meters"], 0.2);
+    assert_eq!(s["note"], Value::Null);
+}
+
+#[tokio::test]
+async fn stale_export_files_are_swept_before_an_export() {
+    let mock = Arc::new(MockDriver::new());
+    mock.set_summary_stats(None, two_filaments(), None);
+    let dir = test_dir();
+    let stale = dir.join("summary-1-1.gcode");
+    let fresh = dir.join("summary-1-2.gcode");
+    let other = dir.join("keep-me.gcode");
+    for p in [&stale, &fresh, &other] {
+        std::fs::write(p, "x").unwrap();
+    }
+    let old = std::time::SystemTime::now() - Duration::from_secs(120);
+    std::fs::File::options()
+        .write(true)
+        .open(&stale)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    let t = tools_in(&mock, dir.clone());
+    slice_to_done(&t).await;
+    t.studio_get_slice_summary(summary_args(None))
+        .await
+        .unwrap();
+    assert!(!stale.exists(), "stale export was not swept");
+    assert!(
+        fresh.exists(),
+        "a recent file may belong to a running export"
+    );
+    assert!(other.exists(), "only summary-*.gcode files are ours");
+}
+
+#[tokio::test]
+async fn missing_export_dir_is_a_note_not_an_error() {
+    let mock = Arc::new(MockDriver::new());
+    mock.set_summary_stats(None, two_filaments(), None);
+    let missing = test_dir().join("does-not-exist");
+    let t = tools_in(&mock, missing);
+    slice_to_done(&t).await;
+    let s = t
+        .studio_get_slice_summary(summary_args(None))
+        .await
+        .unwrap();
+    assert!(s["filaments"].as_array().unwrap().is_empty());
+    assert!(s["note"].as_str().unwrap().contains("export directory"));
+    assert_eq!(count(&mock, "export_gcode"), 0);
+}
+
+#[tokio::test]
+async fn plate_selection_changed_has_its_own_message() {
+    let mock = Arc::new(MockDriver::new());
+    let t = tools_with(&mock);
+    mock.fail_tool(
+        DriverTool::SliceStart,
+        DriverError::InvalidParams {
+            message: "Only the selected plate is supported; select it explicitly first".to_string(),
+        },
+        1,
+    );
+    let e = t.studio_slice(slice_args(None)).await.unwrap_err();
+    assert_eq!(e.code, ToolErrorCode::RevisionConflict);
+    assert!(
+        e.message.contains("plate selection changed"),
+        "{}",
+        e.message
+    );
+    assert_eq!(e.details["reason"], "plate_selection_changed");
 }

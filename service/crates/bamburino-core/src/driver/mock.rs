@@ -807,14 +807,20 @@ impl DriverClient for MockDriver {
     }
 }
 
-/// A realistic Bambu G-code head: header block with the per-filament totals
-/// (when `header` and there are filaments), then some moves.
+/// A realistic Bambu G-code head. Like the real one it lists ONLY the used
+/// filaments (those with grams > 0), in id order, and names them in
+/// `; filament: <1-based ids>`; the header is written only when `header` and
+/// at least one filament is used.
 fn gcode_text(filaments: &[FilamentUsage], header: bool) -> String {
     let mut out = String::from("; HEADER_BLOCK_START\n; BambuStudio 02.05.00.66\n");
-    if header && !filaments.is_empty() {
+    let mut used: Vec<&FilamentUsage> = filaments
+        .iter()
+        .filter(|u| u.grams.unwrap_or(0.0) > 0.0)
+        .collect();
+    used.sort_by_key(|u| u.index);
+    if header && !used.is_empty() {
         let join = |f: &dyn Fn(&FilamentUsage) -> f64| {
-            filaments
-                .iter()
+            used.iter()
                 .map(|u| format!("{:.2}", f(u)))
                 .collect::<Vec<_>>()
                 .join(",")
@@ -823,8 +829,13 @@ fn gcode_text(filaments: &[FilamentUsage], header: bool) -> String {
         let g = join(&|u| u.grams.unwrap_or(0.0));
         // PLA density 1.24 g/cm3.
         let cm3 = join(&|u| u.grams.unwrap_or(0.0) / 1.24);
+        let ids = used
+            .iter()
+            .map(|u| (u.index + 1).to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         out.push_str(&format!(
-            "; total filament length [mm] : {mm}\n; total filament volume [cm^3] : {cm3}\n; total filament weight [g] : {g}\n"
+            "; total filament length [mm] : {mm}\n; total filament volume [cm^3] : {cm3}\n; total filament weight [g] : {g}\n; filament: {ids}\n"
         ));
     }
     out.push_str("; HEADER_BLOCK_END\nG1 X10 Y10 E1\n");

@@ -7,8 +7,16 @@
 //!   different plate is selected first, through the mutation pipeline.
 //! * The print time of the summary comes from `slice_get_state`; the driver's
 //!   `preview_get_summary` has no grams or meters. Those are read from the
-//!   header of the G-code, exported to a temp file under `%TEMP%\bamburino\`
-//!   that is always deleted afterwards.
+//!   header of the G-code, exported to a temp file in `Tools::export_dir` that
+//!   is always deleted afterwards (and leftovers older than 60 s are swept).
+//!
+//! # Export directory contract (Tasks 13/16)
+//!
+//! Bambu Studio (interactive user) writes the file, the service (possibly
+//! `LocalService`, whose `%TEMP%` the user cannot reach) reads and deletes it.
+//! Production value: `%ProgramData%\Bamburino\tmp`, created by the installer
+//! with an ACL that gives the interactive user write and the service
+//! read/delete. The directory must exist; the service does not create it.
 
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -33,6 +41,8 @@ const HEADER_SCAN_LIMIT: u64 = 4 * 1024 * 1024;
 /// file synchronously, so this is a safety net).
 const EXPORT_POLLS: u32 = 20;
 const EXPORT_POLL_EVERY: Duration = Duration::from_millis(100);
+/// Leftover exports older than this are deleted before a new export.
+const STALE_EXPORT_AGE: Duration = Duration::from_secs(60);
 
 fn invalid(msg: &str) -> ToolError {
     ToolError::new(ToolErrorCode::InvalidArgument, msg)
@@ -98,16 +108,25 @@ fn job_json(job: &DriverJob, plate_id: u32) -> Value {
     v
 }
 
-/// Filament totals of the Bambu G-code header, one entry per filament.
+/// Filament totals of the Bambu G-code header.
+///
+/// The three `total filament ...` lines list ONLY the filaments the plate
+/// uses (a `std::map<filament_id, double>` in `GCodeProcessor.cpp`), in id
+/// order, so their position is not the filament slot. The slots come from the
+/// header line `; filament: 1,3` (`GCode.cpp`, 1-based ids of the used
+/// filaments, `print.get_slice_used_filaments`).
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct HeaderUsage {
     length_mm: Option<Vec<Option<f64>>>,
     volume_cm3: Option<Vec<Option<f64>>>,
     weight_g: Option<Vec<Option<f64>>>,
+    /// 1-based slots of the used filaments (`; filament: ...`).
+    slots: Option<Vec<u32>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FilamentRow {
+    /// 0-based filament slot (Studio shows `index + 1`).
     pub index: u32,
     pub grams: Option<f64>,
     pub meters: Option<f64>,
@@ -116,11 +135,24 @@ pub(crate) struct FilamentRow {
 
 fn values_after(rest: &str) -> Option<Vec<Option<f64>>> {
     let (_, list) = rest.split_once(':')?;
+    if list.trim().is_empty() {
+        return Some(Vec::new());
+    }
     Some(
         list.split(',')
             .map(|v| v.trim().parse::<f64>().ok().filter(|n| n.is_finite()))
             .collect(),
     )
+}
+
+fn slots_after(rest: &str) -> Option<Vec<u32>> {
+    let list = rest.trim_start().strip_prefix(':')?.trim();
+    if list.is_empty() {
+        return Some(Vec::new());
+    }
+    list.split(',')
+        .map(|v| v.trim().parse::<u32>().ok().filter(|n| *n >= 1))
+        .collect()
 }
 
 impl HeaderUsage {
@@ -141,10 +173,19 @@ impl HeaderUsage {
                 *slot = values_after(rest);
             }
         }
+        if self.slots.is_none()
+            && let Some(rest) = body.strip_prefix("filament")
+            && rest.trim_start().starts_with(':')
+        {
+            self.slots = slots_after(rest);
+        }
     }
 
     pub(crate) fn complete(&self) -> bool {
-        self.length_mm.is_some() && self.volume_cm3.is_some() && self.weight_g.is_some()
+        self.length_mm.is_some()
+            && self.volume_cm3.is_some()
+            && self.weight_g.is_some()
+            && self.slots.is_some()
     }
 
     #[cfg(test)]
@@ -156,30 +197,46 @@ impl HeaderUsage {
         u
     }
 
-    /// `None` when the header has none of the three lines.
-    pub(crate) fn rows(&self) -> Option<Vec<FilamentRow>> {
+    /// One row per used filament. `Err` carries the reason the usage cannot
+    /// be attributed to filament slots reliably; nothing is guessed.
+    pub(crate) fn rows(&self) -> Result<Vec<FilamentRow>, String> {
         let lists = [&self.length_mm, &self.volume_cm3, &self.weight_g];
-        if lists.iter().all(|l| l.is_none()) {
-            return None;
+        let present: Vec<&Vec<Option<f64>>> = lists.iter().filter_map(|l| l.as_ref()).collect();
+        if present.is_empty() {
+            return Err("The exported G-code header has no filament totals (total filament length/volume/weight); grams and meters are unavailable.".to_string());
         }
-        let n = lists
-            .iter()
-            .filter_map(|l| l.as_ref())
-            .map(Vec::len)
-            .max()?;
-        let at = |l: &Option<Vec<Option<f64>>>, i: usize| {
-            l.as_ref().and_then(|v| v[..].get(i).copied().flatten())
+        let n = present[0].len();
+        if present.iter().any(|l| l.len() != n) {
+            return Err("The exported G-code header lists a different number of filaments in its length, volume and weight totals; usage is not attributed to avoid mixing them up.".to_string());
+        }
+        let Some(slots) = &self.slots else {
+            return Err("The exported G-code header has no `; filament:` line with the used filament slots, so the totals cannot be attributed to slots.".to_string());
         };
-        Some(
-            (0..n)
-                .map(|i| FilamentRow {
-                    index: i as u32,
-                    grams: at(&self.weight_g, i),
-                    meters: at(&self.length_mm, i).map(|mm| mm / 1000.0),
-                    volume_cm3: at(&self.volume_cm3, i),
-                })
-                .collect(),
-        )
+        if slots.len() != n {
+            return Err(format!(
+                "The exported G-code header lists {} used filament slot(s) but {n} total(s); usage is not attributed to avoid mixing them up.",
+                slots.len()
+            ));
+        }
+        if n == 0 {
+            return Err("The exported G-code header lists no used filament.".to_string());
+        }
+        // The totals are keyed by filament id in ascending order.
+        let at = |l: &Option<Vec<Option<f64>>>, i: usize| {
+            l.as_ref().and_then(|v| v.get(i).copied().flatten())
+        };
+        let mut sorted_slots: Vec<u32> = slots.clone();
+        sorted_slots.sort_unstable();
+        Ok(sorted_slots
+            .into_iter()
+            .enumerate()
+            .map(|(i, slot)| FilamentRow {
+                index: slot - 1,
+                grams: at(&self.weight_g, i),
+                meters: at(&self.length_mm, i).map(|mm| mm / 1000.0),
+                volume_cm3: at(&self.volume_cm3, i),
+            })
+            .collect())
     }
 }
 
@@ -196,12 +253,36 @@ impl Drop for TempFile {
     }
 }
 
-fn temp_gcode_path() -> std::io::Result<PathBuf> {
+fn temp_gcode_path(dir: &Path) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join("bamburino");
-    std::fs::create_dir_all(&dir)?;
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    Ok(dir.join(format!("summary-{}-{n}.gcode", std::process::id())))
+    dir.join(format!("summary-{}-{n}.gcode", std::process::id()))
+}
+
+/// Deletes `summary-*.gcode` files older than [`STALE_EXPORT_AGE`]: the
+/// driver copies the file synchronously (up to 10 s), so one can land after
+/// the call that asked for it was dropped (client timeout or cancel) and its
+/// guard already ran.
+fn sweep_stale_exports(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !(name.starts_with("summary-") && name.ends_with(".gcode")) {
+            continue;
+        }
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > STALE_EXPORT_AGE);
+        if old {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Scans the head of the file for the filament totals.
@@ -287,6 +368,15 @@ impl Tools {
                 Ok(job) => break job,
                 // The plate revision went stale: one retry with a fresh one.
                 Err(DriverError::StaleReference { .. }) if !retried => retried = true,
+                Err(DriverError::InvalidParams { message })
+                    if message.contains("selected plate") =>
+                {
+                    return Err(ToolError::new(
+                        ToolErrorCode::RevisionConflict,
+                        "The plate selection changed in Bambu Studio before slicing started; nothing was sliced. Retry.",
+                    )
+                    .with_details(json!({ "reason": "plate_selection_changed", "driver": message })));
+                }
                 Err(e) => return Err(write_error(e)),
             }
         };
@@ -313,7 +403,9 @@ impl Tools {
             .unwrap_or(job.plate_index)
     }
 
-    /// One poll of a slice job.
+    /// One poll of a slice job. Every `export_gcode` (see the summary) creates a
+    /// driver job too and the driver keeps only the last 64 jobs, so an old slice
+    /// job may become `JOB_NOT_FOUND` after many summaries.
     pub async fn studio_slice_status(&self, a: JobArgs) -> Result<Value, ToolError> {
         self.revision.touch_client();
         self.probe
@@ -427,9 +519,15 @@ impl Tools {
     ) -> Result<Vec<FilamentRow>, String> {
         // No edit may land between the plate revision and the export.
         let _serial = self.write_lock.lock().await;
-        let path = temp_gcode_path().map_err(|e| {
-            format!("no temp file for the G-code export ({e}); filament usage is unavailable")
-        })?;
+        let dir = self.export_dir.as_path();
+        if !dir.is_dir() {
+            return Err(format!(
+                "the G-code export directory {} does not exist; filament usage is unavailable",
+                dir.display()
+            ));
+        }
+        sweep_stale_exports(dir);
+        let path = temp_gcode_path(dir);
         let _cleanup = TempFile(path.clone());
         let revision = self
             .driver
@@ -467,10 +565,7 @@ impl Tools {
             .map_err(|e| {
                 format!("G-code header could not be read ({e}); filament usage is unavailable")
             })?;
-        usage.rows().ok_or_else(|| {
-            "The exported G-code header has no filament totals (total filament length/volume/weight); grams and meters are unavailable."
-                .to_string()
-        })
+        usage.rows()
     }
 }
 
@@ -484,30 +579,78 @@ mod tests {
     fn parses_the_bambu_header() {
         let rows = HeaderUsage::parse(FIXTURE).rows().unwrap();
         assert_eq!(rows.len(), 2);
+        // `; filament: 1,3` -> slots 0 and 2 (0-based).
         assert_eq!(rows[0].index, 0);
         assert_eq!(rows[0].grams, Some(4.28));
         assert!((rows[0].meters.unwrap() - 1.43451).abs() < 1e-9);
         assert_eq!(rows[0].volume_cm3, Some(3.45));
+        assert_eq!(rows[1].index, 2);
         assert_eq!(rows[1].grams, Some(2.42));
         assert!((rows[1].meters.unwrap() - 0.81207).abs() < 1e-9);
         assert_eq!(rows[1].volume_cm3, Some(1.95));
     }
 
     #[test]
-    fn missing_tags_give_none() {
-        assert_eq!(
-            HeaderUsage::parse("; HEADER_BLOCK_START\nG1 X1\n").rows(),
-            None
+    fn filament_line_is_not_confused_with_density_or_diameter() {
+        let u =
+            HeaderUsage::parse("; filament_density: 1.24,1.24\n; filament_diameter: 1.75,1.75\n");
+        assert_eq!(u.slots, None);
+    }
+
+    #[test]
+    fn missing_tags_are_an_error() {
+        assert!(
+            HeaderUsage::parse("; HEADER_BLOCK_START\nG1 X1\n")
+                .rows()
+                .is_err()
         );
     }
 
     #[test]
-    fn single_filament_and_garbage_values() {
+    fn missing_filament_line_is_an_error() {
+        let u = HeaderUsage::parse("; total filament weight [g] : 1.00\n");
+        assert!(u.rows().unwrap_err().contains("`; filament:`"));
+    }
+
+    #[test]
+    fn length_mismatch_between_lists_is_an_error() {
         let u = HeaderUsage::parse(
-            ";total filament length [mm] : 100.00\n; total filament weight [g] : abc\n",
+            "; total filament length [mm] : 1.00,2.00\n; total filament weight [g] : 1.00\n; filament: 1,2\n",
+        );
+        assert!(u.rows().unwrap_err().contains("different number"));
+    }
+
+    #[test]
+    fn slot_count_mismatch_is_an_error() {
+        let u = HeaderUsage::parse("; total filament weight [g] : 1.00,2.00\n; filament: 1\n");
+        assert!(u.rows().is_err());
+    }
+
+    #[test]
+    fn empty_value_lists_are_no_rows() {
+        let u = HeaderUsage::parse(
+            "; total filament length [mm] : \n; total filament volume [cm^3] : \n; total filament weight [g] : \n; filament: \n",
+        );
+        assert_eq!(u.length_mm, Some(Vec::new()));
+        assert!(u.rows().unwrap_err().contains("no used filament"));
+    }
+
+    #[test]
+    fn slots_are_sorted_like_the_map_they_come_from() {
+        let u = HeaderUsage::parse("; total filament weight [g] : 1.00,2.00\n; filament: 4,2\n");
+        let rows = u.rows().unwrap();
+        assert_eq!((rows[0].index, rows[0].grams), (1, Some(1.0)));
+        assert_eq!((rows[1].index, rows[1].grams), (3, Some(2.0)));
+    }
+
+    #[test]
+    fn garbage_values_are_null() {
+        let u = HeaderUsage::parse(
+            ";total filament length [mm] : 100.00\n; total filament weight [g] : abc\n; filament: 2\n",
         );
         let rows = u.rows().unwrap();
         assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].index, 1);
         assert_eq!(rows[0].meters, Some(0.1));
         assert_eq!(rows[0].grams, None);
         assert_eq!(rows[0].volume_cm3, None);
@@ -516,7 +659,7 @@ mod tests {
     #[test]
     fn only_the_first_occurrence_counts() {
         let u = HeaderUsage::parse(
-            "; total filament weight [g] : 1.00\n; total filament weight [g] : 9.00\n",
+            "; total filament weight [g] : 1.00\n; total filament weight [g] : 9.00\n; filament: 1\n",
         );
         assert_eq!(u.rows().unwrap()[0].grams, Some(1.0));
     }
