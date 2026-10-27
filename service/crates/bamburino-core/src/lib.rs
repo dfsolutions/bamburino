@@ -2,3 +2,4 @@
 //! Core logic of Bamburino (no Windows-specific dependencies).
 
 pub mod build_info;
+pub mod catalog;
