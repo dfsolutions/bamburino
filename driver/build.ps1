@@ -27,6 +27,9 @@
                  output in the step log. The sentinel is written only after both succeed. deps-out is not wiped on a
                  mismatch: deps\build keeps the ExternalProject stamps, so a re-run after a failure resumes there.
                  Touches only <clone>\deps\build (kept by -Step patch) and deps-out, never the rest of the clone.
+    Free disk: every step that calls prereqs.ps1 passes -MinFreeGB (Get-StepMinFreeGB): 25 GB only before the
+    first deps build (deps without <clone>\deps\build: the peak), 12 GB for deps once deps\build exists (resume)
+    and for the app step (Task 8 must call Get-StepMinFreeGB -Step app).
     Step order: -Step fetch is only for an absent or clean clone (a patched clone is dirty, so fetch exits 20
     on it by design). -Step patch does its own reset and never needs fetch again. The deps and app steps never
     call fetch; an 'all' step runs fetch only when the clone is missing.
@@ -217,6 +220,14 @@ function Get-DepsKey {
     return $key
 }
 
+function Get-StepMinFreeGB {
+    # Free space (GB) prereqs.ps1 -MinFreeGB must require on the build root drive for a step.
+    # 25 only for the first deps build (peak); 12 for a deps resume/no-op and for the app step.
+    param([Parameter(Mandatory)][ValidateSet('deps', 'app')][string]$Step, [string]$Src = (Join-Path (Get-BuildRoot) 'BambuStudio'))
+    if ($Step -eq 'deps' -and -not (Test-Path -LiteralPath (Join-Path $Src 'deps\build') -PathType Container)) { return 25 }
+    return 12
+}
+
 function Invoke-Deps {
     $u = Get-Upstream
     $want = $u['studio.tag_commit']
@@ -238,8 +249,9 @@ function Invoke-Deps {
 
     # Toolchain, in-process: VS developer environment first, then prereqs -Export, which puts the VS CMake first and
     # strips Strawberry's MinGW bin from the PATH that Enter-VsDevShell inherited from the Machine PATH.
+    $minFree = Get-StepMinFreeGB -Step deps -Src $src
     Enter-VsEnv
-    & (Join-Path $PSScriptRoot 'prereqs.ps1') -Check -Export
+    & (Join-Path $PSScriptRoot 'prereqs.ps1') -Check -Export -MinFreeGB $minFree
     if ($LASTEXITCODE -ne 0) { Write-Host "ERROR prerequisites missing (prereqs.ps1 exit $LASTEXITCODE)"; exit 10 }
     $cmake = $env:BAMBURINO_CMAKE
     if (-not $cmake -or -not (Test-Path -LiteralPath $cmake -PathType Leaf)) { throw "BAMBURINO_CMAKE not set by prereqs.ps1 -Export: '$cmake'" }
@@ -251,6 +263,7 @@ function Invoke-Deps {
     $cmakeArgs = @('..', '-G', 'Visual Studio 17 2022', '-A', 'x64', "-DDESTDIR=$out", '-DCMAKE_BUILD_TYPE=Release', '-DDEP_DEBUG=OFF')
     $msbuildArgs = @('/m', 'ALL_BUILD.vcxproj', '/p:Configuration=Release', '/v:minimal')
     Add-Log $log "== deps tree $key (studio.tag_commit $want)"
+    Add-Log $log "== prereqs.ps1 -MinFreeGB $minFree"
     Add-Log $log "== PATH=$env:Path"
     Add-Log $log "== cwd $buildDir"
     Add-Log $log "== $cmake $($cmakeArgs -join ' ')"

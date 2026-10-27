@@ -19,6 +19,11 @@ if (Test-Path -LiteralPath $inc) {
     $boost += @(Get-ChildItem -LiteralPath $inc -Directory -Filter 'boost-*' | ForEach-Object { Join-Path $_.FullName 'boost\version.hpp' })
 }
 if (-not @($boost | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })) { throw "missing $inc\boost\version.hpp (or $inc\boost-*\boost\version.hpp)" }
+# The app step finds Boost through its CMake package config, not through include\boost.
+$cmakeDir = Join-Path $prefix 'lib\cmake'
+if (-not ((Test-Path -LiteralPath $cmakeDir) -and @(Get-ChildItem -LiteralPath $cmakeDir -Directory -Filter 'Boost-*').Count -ge 1)) {
+    throw "missing Boost CMake config $cmakeDir\Boost-*"
+}
 $ssl = Join-Path $inc 'openssl\ssl.h'
 if (-not (Test-Path -LiteralPath $ssl -PathType Leaf)) { throw "missing $ssl" }
 $libDir = Join-Path $prefix 'lib'

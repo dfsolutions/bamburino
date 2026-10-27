@@ -42,12 +42,18 @@ Sentinel `D:\bb\deps-out\.bamburino-deps-key` = the deps tree SHA-1 above; a sec
 
 Notes:
 - Boost's own CMake install uses the versioned layout on Windows: headers are in
-  `include\boost-1_84\boost`, not `include\boost`. `tools/tests/Deps.Tests.ps1` accepts both. The app step must rely
-  on the Boost CMake config under `lib\cmake` (via `CMAKE_PREFIX_PATH=<deps-out>\usr\local`), not on `include\boost`.
-- The session PATH during the build still contains Git for Windows `usr\bin` and `mingw64\bin` (inherited from the
-  launching shell), after the VS, CMake and Strawberry perl entries; it did not affect the build (Strawberry perl
-  resolves first for OpenSSL).
+  `include\boost-1_84\boost`, not `include\boost`. The app step finds Boost through its CMake package config
+  (`lib\cmake\Boost-1.84.0`, via `CMAKE_PREFIX_PATH=<deps-out>\usr\local`), not through `include\boost`.
+  `tools/tests/Deps.Tests.ps1` accepts both header layouts and asserts that `lib\cmake\Boost-*` exists.
+- Round 1 ran with Git for Windows `mingw64\bin`, `usr\bin` and `usr\local\bin` on the session PATH (inherited from
+  the launching shell, after the VS, CMake and Strawberry perl entries); it did not affect the deps build. Since fix
+  round 1, `prereqs.ps1 -Export` also removes those three directories (keeping `Git\cmd`), so MinGW zlib/curl and
+  MSYS `link.exe` cannot shadow MSVC during `find_package` in the app build.
 - Disk: free space on D: went from 29.6 GB before the build to 19.3 GB after. Measured: `deps-out` 0.9 GB,
-  `deps\build` 4.8 GB (sources, downloads, intermediates); the remaining ~4.5 GB of the drop is not under `D:\bb`
-  deps output as measured (other activity on D: or files skipped by the measurement). `prereqs.ps1 -Check`
-  (minimum 25 GB) now reports `MISSING disk-space`, so `tools/tests/Prereqs.Tests.ps1` fails until space is freed.
+  `deps\build` 4.8 GB (sources, downloads, intermediates); the remaining ~4.5 GB of the drop is not accounted for
+  under these two folders (other activity on D: or files skipped by the measurement).
+- Free-disk thresholds (ruling, fix round 1): 25 GB is required only before the FIRST deps build (the peak).
+  `prereqs.ps1 -MinFreeGB` (default 25) sets the threshold; `build.ps1` picks it with `Get-StepMinFreeGB`:
+  `deps` 25 when `<clone>\deps\build` does not exist, 12 when it does (resume or no-op), `app` 12.
+  `tools/tests/Prereqs.Tests.ps1` tests the check with explicit thresholds (12 holds, 10000 fails) instead of the
+  machine's current free space.

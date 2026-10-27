@@ -8,24 +8,33 @@
     -Export  (with -Check or -Install) sets session variables BAMBURINO_CMAKE and BAMBURINO_WIN10SDK_PATH
              and rebuilds the session PATH for a deterministic toolchain: the VS-bundled CMake bin directory first,
              then Strawberry perl\bin and pkg-config; C:\Strawberry\c\bin (MinGW gcc, headers, libs, its own CMake)
-             is removed so MinGW files cannot leak into find_package during the upstream build.
+             and Git for Windows' MinGW/MSYS directories (<ProgramFiles>\Git\mingw64\bin, Git\usr\bin,
+             Git\usr\local\bin; Git\cmd stays, so git keeps working) are removed, so MinGW headers, libs, zlib/curl
+             and link.exe cannot leak into find_package or shadow MSVC during the upstream build.
              Invoke in-process (& driver/prereqs.ps1 -Check -Export) for the variables to reach the caller.
+    -MinFreeGB  free space (GB) required on the build root drive by the disk-space check (default 25).
+             25 GB covers the peak of the FIRST dependency build; once <clone>\deps\build exists (resume or no-op)
+             and for the app step, 12 GB is enough. driver/build.ps1 picks the value per step with Get-StepMinFreeGB
+             (deps: 25 without deps\build, 12 with it; app: 12).
 #>
 [CmdletBinding()]
 param(
     [switch]$Check,
     [switch]$Install,
-    [switch]$Export
+    [switch]$Export,
+    [ValidateRange(0, 100000)][int]$MinFreeGB = 25
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot '..\tools\Upstream.psm1') -Force
 
 $MinCmake = [version]'3.24.0'
-$MinFreeGB = 25
 $SdkIncludeRoot = 'C:\Program Files (x86)\Windows Kits\10\Include'
 $StrawberryRoot = 'C:\Strawberry\'
 $StrawberryMingwBin = 'C:\Strawberry\c\bin'
+# Git for Windows ships MinGW/MSYS tools (zlib, curl, link.exe, perl, gcc runtime) that must not shadow MSVC.
+$GitRoot = Join-Path $env:ProgramFiles 'Git'
+$PathDenyList = @($StrawberryMingwBin, (Join-Path $GitRoot 'mingw64\bin'), (Join-Path $GitRoot 'usr\bin'), (Join-Path $GitRoot 'usr\local\bin'))
 
 # Looks up an executable in the process PATH, then in the persisted Machine/User PATH
 # (a fresh install updates the registry but not the PATH of already running processes).
@@ -174,8 +183,8 @@ foreach ($name in $results.Keys) {
 if ($Export) {
     if ($results['cmake'].Ok) { $env:BAMBURINO_CMAKE = $results['cmake'].Path }
     if ($results['windows-sdk'].Ok) { $env:BAMBURINO_WIN10SDK_PATH = $results['windows-sdk'].Path }
-    # Drop Strawberry's MinGW bin, then prepend in reverse priority order so the CMake bin directory ends up first.
-    $paths = @($env:Path -split ';' | Where-Object { $_ -and $_.TrimEnd('\') -ne $StrawberryMingwBin })
+    # Drop the MinGW/MSYS directories ($PathDenyList), then prepend in reverse priority order so the CMake bin directory ends up first.
+    $paths = @($env:Path -split ';' | Where-Object { $_ -and $PathDenyList -notcontains $_.TrimEnd('\') })
     foreach ($tool in 'pkg-config', 'strawberry-perl', 'cmake') {
         if (-not $results[$tool].Ok) { continue }
         $dir = Split-Path -Parent $results[$tool].Path
