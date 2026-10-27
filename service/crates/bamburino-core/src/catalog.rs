@@ -35,6 +35,9 @@ pub struct OptionDef {
     pub max: Option<f64>,
     pub readonly: bool,
     pub enum_values: Vec<String>,
+    /// Strings Bambu Studio actually serializes for enum options; empty when
+    /// the catalog carries none (then `enum_values` are the serialized forms).
+    pub serialized_enum_values: Vec<String>,
     /// Number, bool, list, or a string such as `"400%"`. `None` when the
     /// catalog only carries a `default_expression`; JSON `null` and an absent
     /// field both map to `None`.
@@ -180,6 +183,8 @@ struct RawOption {
     #[serde(default)]
     enum_values: Vec<String>,
     #[serde(default)]
+    serialized_enum_values: Vec<String>,
+    #[serde(default)]
     default: Option<serde_json::Value>,
     #[serde(default)]
     excluded_reason: Option<String>,
@@ -216,6 +221,7 @@ impl Catalog {
                     max: o.max,
                     readonly: o.readonly,
                     enum_values: o.enum_values,
+                    serialized_enum_values: o.serialized_enum_values,
                     default: o.default,
                     excluded: o.excluded_reason.is_some(),
                 };
