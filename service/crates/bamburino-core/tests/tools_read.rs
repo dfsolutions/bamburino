@@ -19,6 +19,7 @@ fn tools_with(mock: &Arc<MockDriver>, process_running: bool) -> Tools {
             allow_version_mismatch: false,
             poll_every: Duration::from_secs(60),
             idle_after: Duration::from_secs(60),
+            token_present: true,
         },
     )
 }

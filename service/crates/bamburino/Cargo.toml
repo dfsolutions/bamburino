@@ -12,8 +12,13 @@ path = "src/main.rs"
 
 [dependencies]
 bamburino-core = { path = "../bamburino-core" }
+serde.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+getrandom.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 bamburino-core = { path = "../bamburino-core", features = ["mock"] }
 
 [target.'cfg(windows)'.dependencies]

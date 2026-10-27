@@ -31,6 +31,9 @@ pub struct ToolConfig {
     pub poll_every: Duration,
     /// Time without client requests after which polling stops.
     pub idle_after: Duration,
+    /// Whether a driver token is configured (from the service configuration,
+    /// Task 13); drives the `driver_token_missing` status.
+    pub token_present: bool,
 }
 
 pub struct Tools {
@@ -43,6 +46,8 @@ pub struct Tools {
     pub(crate) write_lock: tokio::sync::Mutex<()>,
     /// Slice jobs started through this service: job id -> plate index.
     pub(crate) jobs: std::sync::Mutex<std::collections::HashMap<String, u32>>,
+    /// Directory the driver writes temporary G-code exports to (see `slice`).
+    pub(crate) export_dir: std::path::PathBuf,
 }
 
 impl Tools {
@@ -62,14 +67,18 @@ impl Tools {
         "catalog_search",
     ];
 
+    /// `export_dir`: where the driver may write temporary G-code exports. It
+    /// must be writable by the interactive Bambu Studio user and readable and
+    /// deletable by the service; production: `%ProgramData%\Bamburino\tmp`.
     pub fn new(
         driver: Arc<dyn DriverClient>,
         process: Arc<dyn ProcessProbe>,
         cfg: ToolConfig,
+        export_dir: std::path::PathBuf,
     ) -> Self {
-        // A missing driver token is detected when the driver client is built,
-        // so the probe is always told the token is present.
-        let probe = Arc::new(StatusProbe::new(driver.clone(), process, true));
+        // Task 13: `token_present` comes from the configuration (it was
+        // hard-coded to `true` before the config existed).
+        let probe = Arc::new(StatusProbe::new(driver.clone(), process, cfg.token_present));
         Self {
             driver,
             catalog: Catalog::embedded(),
@@ -78,6 +87,7 @@ impl Tools {
             cfg,
             write_lock: tokio::sync::Mutex::new(()),
             jobs: std::sync::Mutex::new(std::collections::HashMap::new()),
+            export_dir,
         }
     }
 
