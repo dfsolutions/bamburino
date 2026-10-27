@@ -19,6 +19,8 @@ use super::{
 use crate::build_info;
 use crate::catalog::{Catalog, OptionKind};
 
+/// Settings the mock reports but the driver does not accept for writing.
+const READ_ONLY_KEYS: [&str; 1] = ["ironing_type"];
 const OBJECT_ID: &str = "obj-1";
 const INSTANCE_ID: &str = "inst-1";
 
@@ -219,6 +221,7 @@ impl MockDriver {
     pub fn new() -> Self {
         let settings = WRITABLE_KEYS
             .iter()
+            .chain(READ_ONLY_KEYS.iter())
             .map(|k| (k.to_string(), default_string(k)))
             .collect();
         Self {

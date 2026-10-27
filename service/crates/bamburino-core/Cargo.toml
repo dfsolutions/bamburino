@@ -19,6 +19,7 @@ async-trait.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
 sha2.workspace = true
+schemars.workspace = true
 
 [features]
 # In-memory MockDriver for tests of the service layers.

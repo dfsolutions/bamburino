@@ -7,4 +7,5 @@ pub mod detect;
 pub mod driver;
 pub mod errors;
 pub mod revision;
+pub mod tools;
 pub mod validate;

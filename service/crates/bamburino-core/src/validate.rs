@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use crate::catalog::{Catalog, CatalogScope, OptionDef, OptionKind};
 use crate::errors::{ToolError, ToolErrorCode};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Scope {
     Project,
