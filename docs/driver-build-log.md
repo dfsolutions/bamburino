@@ -24,3 +24,30 @@ which it adds to the Machine PATH). `prereqs.ps1 -Export` puts the VS CMake bin 
 PATH, followed by Strawberry `perl\bin` and pkg-config, and removes `C:\Strawberry\c\bin` from the session PATH so
 MinGW headers, libraries and tools cannot leak into `find_package` during the upstream build. The Machine PATH is
 not modified.
+
+## 2026-10-27 - Dependencies (Task 6)
+
+`pwsh driver/build.ps1 -Step deps` on the patched clone (`D:\bb\BambuStudio`, `v02.08.04.57`), deps tree
+`8e648ef0f91f8d5ef2b0844e1e252be91ce81ac9` (`git rev-parse <tag_commit>:deps`).
+
+| Round | Start | End | Duration | Outcome | First error | Fix |
+|---|---|---|---|---|---|---|
+| 1 | 23:11:06 | 23:33:58 | 22.9 min (cmake configure + msbuild 22.8 min) | OK, exit 0 | none (0 `error XXnnnn:` lines in the log) | none |
+
+Log: `D:\bb\logs\deps-20261027-231109.log` (~51k lines). Rounds used: 1 of 3.
+
+Result: `D:\bb\deps-out\usr\local` with Boost 1.84, OpenSSL, wxWidgets 3.1 (`lib\vc_x64_lib\wxmsw31u_core.lib`),
+CGAL, OpenVDB, OCCT, TBB, FFmpeg, OpenCV, assimp, curl, GMP/MPFR and the rest of `deps/CMakeLists.txt`.
+Sentinel `D:\bb\deps-out\.bamburino-deps-key` = the deps tree SHA-1 above; a second `-Step deps` is a no-op in 0.5 s.
+
+Notes:
+- Boost's own CMake install uses the versioned layout on Windows: headers are in
+  `include\boost-1_84\boost`, not `include\boost`. `tools/tests/Deps.Tests.ps1` accepts both. The app step must rely
+  on the Boost CMake config under `lib\cmake` (via `CMAKE_PREFIX_PATH=<deps-out>\usr\local`), not on `include\boost`.
+- The session PATH during the build still contains Git for Windows `usr\bin` and `mingw64\bin` (inherited from the
+  launching shell), after the VS, CMake and Strawberry perl entries; it did not affect the build (Strawberry perl
+  resolves first for OpenSSL).
+- Disk: free space on D: went from 29.6 GB before the build to 19.3 GB after. Measured: `deps-out` 0.9 GB,
+  `deps\build` 4.8 GB (sources, downloads, intermediates); the remaining ~4.5 GB of the drop is not under `D:\bb`
+  deps output as measured (other activity on D: or files skipped by the measurement). `prereqs.ps1 -Check`
+  (minimum 25 GB) now reports `MISSING disk-space`, so `tools/tests/Prereqs.Tests.ps1` fails until space is freed.

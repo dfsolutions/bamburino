@@ -16,6 +16,17 @@
                  Idempotent: every run starts again from the reset tree. Before the reset, the clone's
                  'git status --porcelain' is written to the step log, so discarded local edits stay visible.
                  Also prints the build identity CMake definitions (Get-IdentityCMakeDefines) for that patch_id.
+    -Step deps   Builds the upstream dependencies (deps/CMakeLists.txt) into <BuildRoot>\deps-out (DESTDIR; the prefix
+                 is deps-out\usr\local). Cache contract (plan C): deps-out\.bamburino-deps-key holds the git tree SHA-1
+                 of deps/ at studio.tag_commit ('git rev-parse <tag_commit>:deps'); when it matches, the step is a no-op
+                 (checked before any toolchain setup). Otherwise the sentinel is removed, the toolchain is set up
+                 in-process (Enter-VsEnv, then prereqs.ps1 -Check -Export, so the VS CMake comes first and Strawberry's
+                 MinGW bin is off PATH), and in <clone>\deps\build it runs
+                 cmake .. -G "Visual Studio 17 2022" -A x64 -DDESTDIR=<BuildRoot>\deps-out -DCMAKE_BUILD_TYPE=Release
+                 -DDEP_DEBUG=OFF, then msbuild /m ALL_BUILD.vcxproj /p:Configuration=Release /v:minimal, with the whole
+                 output in the step log. The sentinel is written only after both succeed. deps-out is not wiped on a
+                 mismatch: deps\build keeps the ExternalProject stamps, so a re-run after a failure resumes there.
+                 Touches only <clone>\deps\build (kept by -Step patch) and deps-out, never the rest of the clone.
     Step order: -Step fetch is only for an absent or clean clone (a patched clone is dirty, so fetch exits 20
     on it by design). -Step patch does its own reset and never needs fetch again. The deps and app steps never
     call fetch; an 'all' step runs fetch only when the clone is missing.
@@ -25,11 +36,12 @@
     passed) read only by app.get_capabilities (buildSuffix, patchId) and the About dialog; SLIC3R_VERSION and
     version.inc are not changed.
     Exit codes: 0 ok; 20 clone dirty (fetch) or patch does not apply (patch);
-                21 clone at an unexpected state (fetch, patch) or patch_id mismatch (patch); 1 any other error.
+                21 clone at an unexpected state (fetch, patch, deps) or patch_id mismatch (patch);
+                10 prerequisites missing (deps); 30 cmake configure or msbuild failed (deps); 1 any other error.
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('fetch', 'patch')][string]$Step
+    [Parameter(Mandatory)][ValidateSet('fetch', 'patch', 'deps')][string]$Step
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -197,8 +209,75 @@ function Invoke-Patch {
     Write-Host "OK patch: $($patches.Count) patch(es) applied on $want (patch_id $actual); identity: $($identity -join ' ')"
 }
 
+function Get-DepsKey {
+    # Git tree SHA-1 of deps/ at studio.tag_commit: the cache key of the dependency build.
+    param([Parameter(Mandatory)][string]$Src, [Parameter(Mandatory)][string]$Commit)
+    $key = ([string](Invoke-Git -C $Src rev-parse "${Commit}:deps" | Select-Object -First 1)).Trim()
+    if ($key -notmatch '^[0-9a-f]{40}$') { throw "git rev-parse ${Commit}:deps returned '$key'" }
+    return $key
+}
+
+function Invoke-Deps {
+    $u = Get-Upstream
+    $want = $u['studio.tag_commit']
+    if ($want -notmatch '^[0-9a-f]{40}$') { throw 'upstream.toml: studio.tag_commit not set' }
+    $root = Get-BuildRoot
+    $src = Join-Path $root 'BambuStudio'
+    if (-not (Test-Path -LiteralPath $src) -or -not (Test-CloneRoot $src)) {
+        Write-Host "ERROR $src is missing or not the root of a git work tree. Run driver/build.ps1 -Step fetch and -Step patch first."
+        exit 21
+    }
+    $key = Get-DepsKey -Src $src -Commit $want
+    $out = Join-Path $root 'deps-out'
+    $keyFile = Join-Path $out '.bamburino-deps-key'
+    if ((Test-Path -LiteralPath $keyFile -PathType Leaf) -and ([System.IO.File]::ReadAllText($keyFile).Trim() -eq $key)) {
+        Write-Host "OK deps: $out already built for deps tree $key, nothing to do"
+        return
+    }
+    if (Test-Path -LiteralPath $keyFile) { Remove-Item -LiteralPath $keyFile -Force }
+
+    # Toolchain, in-process: VS developer environment first, then prereqs -Export, which puts the VS CMake first and
+    # strips Strawberry's MinGW bin from the PATH that Enter-VsDevShell inherited from the Machine PATH.
+    Enter-VsEnv
+    & (Join-Path $PSScriptRoot 'prereqs.ps1') -Check -Export
+    if ($LASTEXITCODE -ne 0) { Write-Host "ERROR prerequisites missing (prereqs.ps1 exit $LASTEXITCODE)"; exit 10 }
+    $cmake = $env:BAMBURINO_CMAKE
+    if (-not $cmake -or -not (Test-Path -LiteralPath $cmake -PathType Leaf)) { throw "BAMBURINO_CMAKE not set by prereqs.ps1 -Export: '$cmake'" }
+    $msbuild = (Get-Command msbuild.exe -ErrorAction Stop).Source
+
+    $buildDir = Join-Path $src 'deps\build'
+    New-Item -ItemType Directory -Force -Path $buildDir, $out | Out-Null
+    $log = Write-StepLog -Step 'deps'
+    $cmakeArgs = @('..', '-G', 'Visual Studio 17 2022', '-A', 'x64', "-DDESTDIR=$out", '-DCMAKE_BUILD_TYPE=Release', '-DDEP_DEBUG=OFF')
+    $msbuildArgs = @('/m', 'ALL_BUILD.vcxproj', '/p:Configuration=Release', '/v:minimal')
+    Add-Log $log "== deps tree $key (studio.tag_commit $want)"
+    Add-Log $log "== PATH=$env:Path"
+    Add-Log $log "== cwd $buildDir"
+    Add-Log $log "== $cmake $($cmakeArgs -join ' ')"
+    Write-Host "Building deps for tree $key into $out; log: $log"
+    $t0 = Get-Date
+    Push-Location -LiteralPath $buildDir
+    try {
+        & $cmake @cmakeArgs *>> $log
+        $code = $LASTEXITCODE
+        Add-Log $log "== cmake configure exit $code"
+        if ($code -ne 0) { Write-Host "ERROR cmake configure failed (exit $code), see $log"; exit 30 }
+        Add-Log $log "== $msbuild $($msbuildArgs -join ' ')"
+        & $msbuild @msbuildArgs *>> $log
+        $code = $LASTEXITCODE
+        $mins = [math]::Round(((Get-Date) - $t0).TotalMinutes, 1)
+        Add-Log $log "== msbuild exit $code after $mins min"
+        if ($code -ne 0) { Write-Host "ERROR msbuild failed (exit $code) after $mins min, see $log"; exit 30 }
+    } finally {
+        Pop-Location
+    }
+    [System.IO.File]::WriteAllText($keyFile, "$key`n", (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "OK deps: built into $out in $mins min; sentinel $keyFile = $key"
+}
+
 switch ($Step) {
     'fetch' { Invoke-Fetch }
     'patch' { Invoke-Patch }
+    'deps' { Invoke-Deps }
 }
 exit 0
