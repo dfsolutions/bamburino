@@ -10,6 +10,14 @@ if ($LASTEXITCODE -ne 0) {
 if (-not $env:BAMBURINO_CMAKE -or -not (Test-Path -LiteralPath $env:BAMBURINO_CMAKE -PathType Leaf)) {
     throw "BAMBURINO_CMAKE is not an existing file: '$env:BAMBURINO_CMAKE'"
 }
+$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+$vsPaths = @(& $vswhere -products * -version '[17.0,18.0)' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+if (-not @($vsPaths | Where-Object { $env:BAMBURINO_CMAKE.StartsWith($_.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) })) {
+    throw "BAMBURINO_CMAKE is not under a VS 2022 installation ($($vsPaths -join ', ')): $env:BAMBURINO_CMAKE"
+}
+$sessionPath = @($env:Path -split ';' | Where-Object { $_ })
+if ($sessionPath[0].TrimEnd('\') -ne (Split-Path -Parent $env:BAMBURINO_CMAKE)) { throw "PATH does not start with the CMake bin dir: $($sessionPath[0])" }
+if (@($sessionPath | Where-Object { $_.TrimEnd('\') -eq 'C:\Strawberry\c\bin' })) { throw 'C:\Strawberry\c\bin is still on the session PATH' }
 $cmakeOut = (& $env:BAMBURINO_CMAKE --version) -join "`n"
 if ($cmakeOut -notmatch 'cmake version (\d+\.\d+\.\d+)') { throw "cannot parse cmake --version: $cmakeOut" }
 if ([version]$Matches[1] -lt [version]'3.24.0') { throw "cmake $($Matches[1]) < 3.24" }

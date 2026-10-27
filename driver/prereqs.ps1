@@ -6,7 +6,9 @@
     -Install installs only what is missing (Strawberry Perl, pkg-config-lite, git core.longpaths), then checks.
              Visual Studio and the Windows SDK are never installed by this script.
     -Export  (with -Check or -Install) sets session variables BAMBURINO_CMAKE and BAMBURINO_WIN10SDK_PATH
-             and prepends the Strawberry Perl and pkg-config directories to PATH.
+             and rebuilds the session PATH for a deterministic toolchain: the VS-bundled CMake bin directory first,
+             then Strawberry perl\bin and pkg-config; C:\Strawberry\c\bin (MinGW gcc, headers, libs, its own CMake)
+             is removed so MinGW files cannot leak into find_package during the upstream build.
              Invoke in-process (& driver/prereqs.ps1 -Check -Export) for the variables to reach the caller.
 #>
 [CmdletBinding()]
@@ -22,6 +24,8 @@ Import-Module (Join-Path $PSScriptRoot '..\tools\Upstream.psm1') -Force
 $MinCmake = [version]'3.24.0'
 $MinFreeGB = 25
 $SdkIncludeRoot = 'C:\Program Files (x86)\Windows Kits\10\Include'
+$StrawberryRoot = 'C:\Strawberry\'
+$StrawberryMingwBin = 'C:\Strawberry\c\bin'
 
 # Looks up an executable in the process PATH, then in the persisted Machine/User PATH
 # (a fresh install updates the registry but not the PATH of already running processes).
@@ -57,12 +61,15 @@ function Test-VsBuildTools {
     return @{ Ok = $false; InstallPath = $installs[0].installationPath; Detail = 'no MSVC 14.4x toolset with cl.exe' }
 }
 
+# VS-bundled CMake first (deterministic toolchain), PATH only as fallback; Strawberry's MinGW CMake is never accepted.
 function Test-Cmake([string]$VsInstall) {
-    $candidates = @(Find-Exe 'cmake.exe')
+    $candidates = @()
     if ($VsInstall) { $candidates += Join-Path $VsInstall 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe' }
+    $candidates += @(Find-Exe 'cmake.exe')
     $seen = @()
     foreach ($c in $candidates) {
         if (-not (Test-Path -LiteralPath $c -PathType Leaf)) { continue }
+        if ($c.StartsWith($StrawberryRoot, [StringComparison]::OrdinalIgnoreCase)) { continue }
         $out = (& $c --version 2>$null) -join "`n"
         if ($out -match 'cmake version (\d+\.\d+\.\d+)') {
             if ([version]$Matches[1] -ge $MinCmake) { return @{ Ok = $true; Path = $c; Detail = "$($Matches[1]) at $c" } }
@@ -104,7 +111,7 @@ function Test-WindowsSdk {
 
 function Test-GitLongPaths {
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return @{ Ok = $false; Detail = 'git not found' } }
-    $v = & git config --global --get core.longpaths
+    $v = & git config --get core.longpaths
     $global:LASTEXITCODE = 0
     if ($v -eq 'true') { return @{ Ok = $true; Detail = 'core.longpaths=true' } }
     $shown = if ($v) { $v } else { '<unset>' }
@@ -118,16 +125,21 @@ function Test-DiskSpace {
     return @{ Ok = ($gb -ge $MinFreeGB); Detail = "$gb GB free on $($drive.Name) for $root (need >= $MinFreeGB GB)" }
 }
 
+# Runs one check; an exception becomes a MISSING result instead of aborting before the list is printed.
+function Invoke-Check([scriptblock]$Test) {
+    try { & $Test } catch { @{ Ok = $false; Detail = "error: $($_.Exception.Message)" } }
+}
+
 function Invoke-Checks {
-    $vs = Test-VsBuildTools
+    $vs = Invoke-Check { Test-VsBuildTools }
     [ordered]@{
         'vs-buildtools'   = $vs
-        'cmake'           = Test-Cmake $vs['InstallPath']
-        'strawberry-perl' = Test-StrawberryPerl
-        'pkg-config'      = Test-PkgConfig
-        'windows-sdk'     = Test-WindowsSdk
-        'git-longpaths'   = Test-GitLongPaths
-        'disk-space'      = Test-DiskSpace
+        'cmake'           = Invoke-Check { Test-Cmake $vs['InstallPath'] }
+        'strawberry-perl' = Invoke-Check { Test-StrawberryPerl }
+        'pkg-config'      = Invoke-Check { Test-PkgConfig }
+        'windows-sdk'     = Invoke-Check { Test-WindowsSdk }
+        'git-longpaths'   = Invoke-Check { Test-GitLongPaths }
+        'disk-space'      = Invoke-Check { Test-DiskSpace }
     }
 }
 
@@ -162,12 +174,14 @@ foreach ($name in $results.Keys) {
 if ($Export) {
     if ($results['cmake'].Ok) { $env:BAMBURINO_CMAKE = $results['cmake'].Path }
     if ($results['windows-sdk'].Ok) { $env:BAMBURINO_WIN10SDK_PATH = $results['windows-sdk'].Path }
-    foreach ($tool in 'pkg-config', 'strawberry-perl') {
-        if ($results[$tool].Ok) {
-            $dir = Split-Path -Parent $results[$tool].Path
-            $env:Path = $dir + ';' + (($env:Path -split ';' | Where-Object { $_ -and $_ -ne $dir }) -join ';')
-        }
+    # Drop Strawberry's MinGW bin, then prepend in reverse priority order so the CMake bin directory ends up first.
+    $paths = @($env:Path -split ';' | Where-Object { $_ -and $_.TrimEnd('\') -ne $StrawberryMingwBin })
+    foreach ($tool in 'pkg-config', 'strawberry-perl', 'cmake') {
+        if (-not $results[$tool].Ok) { continue }
+        $dir = Split-Path -Parent $results[$tool].Path
+        $paths = @($dir) + @($paths | Where-Object { $_.TrimEnd('\') -ne $dir.TrimEnd('\') })
     }
+    $env:Path = $paths -join ';'
 }
 
 $missing = @($results.Values | Where-Object { -not $_.Ok }).Count
