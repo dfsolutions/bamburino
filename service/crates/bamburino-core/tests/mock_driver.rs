@@ -155,6 +155,7 @@ async fn mock_user_undo_restores_previous_values() {
     let after_update = d.app_state().await.unwrap().undo_snapshot;
     assert_ne!(before, after_update);
     d.user_edit("layer_height", "0.3");
+    let after_edit = d.app_state().await.unwrap().undo_snapshot;
     d.user_undo();
 
     let eff = d
@@ -167,7 +168,11 @@ async fn mock_user_undo_restores_previous_values() {
     assert_eq!(eff.len(), 1);
     assert_eq!(eff[0].value, "0.12");
     assert_eq!(eff[0].source, SettingSource::Project);
-    assert_ne!(d.app_state().await.unwrap().undo_snapshot, after_update);
+    // Like the real stack: undo moves the active time back to the snapshot
+    // it restored, which is where the update left it.
+    let after_undo = d.app_state().await.unwrap().undo_snapshot;
+    assert_ne!(after_undo, after_edit);
+    assert_eq!(after_undo, after_update);
 }
 
 #[tokio::test]

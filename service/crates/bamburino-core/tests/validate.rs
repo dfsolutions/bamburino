@@ -115,7 +115,7 @@ fn unknown_key_has_candidates() {
 
 #[test]
 fn scope_not_allowed() {
-    let e = err("layer_height", json!(0.2), Scope::Plate);
+    let e = err("print_sequence", json!("by layer"), Scope::Object);
     assert_eq!(e.code, ToolErrorCode::ScopeNotAllowed);
     assert!(
         e.details["allowed_scopes"]

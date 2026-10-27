@@ -97,6 +97,7 @@ fn writes(mock: &MockDriver) -> usize {
 #[tokio::test]
 async fn demo_batch_applies_four_values() {
     let mock = Arc::new(MockDriver::new());
+    mock.user_edit("top_shell_layers", "3"); // undo_snapshot is Some: the check runs
     let t = tools_with(&mock);
     let rev = revision(&t).await;
     let v = t
@@ -317,6 +318,7 @@ async fn dry_run_returns_diff_and_does_not_write() {
 #[tokio::test]
 async fn mixed_scopes_write_once_per_target() {
     let mock = Arc::new(MockDriver::new());
+    mock.user_edit("top_shell_layers", "3");
     let t = tools_with(&mock);
     let rev = revision(&t).await;
     let v = t
@@ -339,7 +341,7 @@ async fn mixed_scopes_write_once_per_target() {
 }
 
 #[tokio::test]
-async fn unknown_object_and_plate_scope_write_nothing() {
+async fn unknown_object_or_plate_writes_nothing() {
     let mock = Arc::new(MockDriver::new());
     let t = tools_with(&mock);
     let rev = revision(&t).await;
@@ -355,18 +357,127 @@ async fn unknown_object_and_plate_scope_write_nothing() {
         .await
         .unwrap_err();
     assert_eq!(e.code, ToolErrorCode::ObjectNotFound);
-    // No catalog option that the driver can override is plate-scoped, so a
-    // plate change is refused by the catalog check.
     let e = t
         .studio_set_settings(args(
-            vec![plate_change("wall_loops", json!(3), 0)],
+            vec![
+                change("layer_height", json!(0.16)),
+                plate_change("wall_loops", json!(3), 7),
+            ],
             rev,
             None,
         ))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ToolErrorCode::ScopeNotAllowed);
+    assert_eq!(e.code, ToolErrorCode::PlateNotFound);
+    assert_eq!(e.http_status, 404);
     assert_eq!(writes(&mock), 0);
+}
+
+#[tokio::test]
+async fn plate_only_batch_writes_once_with_a_fresh_plate_revision() {
+    let mock = Arc::new(MockDriver::new());
+    mock.user_edit("top_shell_layers", "3");
+    let t = tools_with(&mock);
+    let rev = revision(&t).await;
+    let v = t
+        .studio_set_settings(args(
+            vec![
+                plate_change("sparse_infill_density", json!(50), 0),
+                plate_change("wall_loops", json!(5), 0),
+            ],
+            rev,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(count(&mock, "settings_update"), 0);
+    assert_eq!(count(&mock, "settings_override"), 1);
+    assert_eq!(v["applied"][0]["applied"], "50%");
+    assert_eq!(v["applied"][0]["scope"], "plate");
+    assert_eq!(v["applied"][0]["target"], json!({"plate_id": 0}));
+    assert_eq!(v["applied"][1]["applied"], "5");
+    // Read back from the plate itself.
+    let g = t
+        .studio_get_settings(bamburino_core::tools::GetSettingsArgs {
+            scope: Scope::Plate,
+            target: Some(TargetRef {
+                plate_id: Some(0),
+                object_id: None,
+            }),
+        })
+        .await
+        .unwrap();
+    let s = g["settings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["key"] == "sparse_infill_density")
+        .unwrap();
+    assert_eq!(s["value"], "50%");
+    assert_eq!(s["origin"], "plate");
+}
+
+#[tokio::test]
+async fn project_then_plate_rereads_the_plate_revision() {
+    let mock = Arc::new(MockDriver::new());
+    mock.user_edit("top_shell_layers", "3");
+    let t = tools_with(&mock);
+    let rev = revision(&t).await;
+    // The project write takes a snapshot and so invalidates every plate
+    // revision issued before it; the plate write must use a new one.
+    let v = t
+        .studio_set_settings(args(
+            vec![
+                change("layer_height", json!(0.16)),
+                plate_change("sparse_infill_density", json!(50), 0),
+            ],
+            rev,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(count(&mock, "settings_update"), 1);
+    assert_eq!(count(&mock, "settings_override"), 1);
+    assert_eq!(v["applied"][1]["applied"], "50%");
+    // And the other way round.
+    let rev = v["revision"].as_u64().unwrap();
+    t.studio_set_settings(args(
+        vec![
+            plate_change("wall_loops", json!(5), 0),
+            change("layer_height", json!(0.12)),
+        ],
+        rev,
+        None,
+    ))
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn dry_run_on_plate_does_not_write() {
+    let mock = Arc::new(MockDriver::new());
+    let t = tools_with(&mock);
+    let rev = revision(&t).await;
+    let v = t
+        .studio_set_settings(args(
+            vec![plate_change("sparse_infill_density", json!(50), 0)],
+            rev,
+            Some(true),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(v["diff"][0]["to"], "50%");
+    assert_eq!(v["diff"][0]["target"], json!({"plate_id": 0}));
+    assert_eq!(writes(&mock), 0);
+    let e = t
+        .studio_set_settings(args(
+            vec![plate_change("wall_loops", json!(5), 9)],
+            rev,
+            Some(true),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ToolErrorCode::PlateNotFound);
 }
 
 /// Wraps the mock and injects faults around the write calls.
@@ -376,6 +487,10 @@ struct Flaky {
     fail_override: Option<DriverError>,
     /// Runs inside `settings_update`, before the write reaches the mock.
     before_update: Option<Box<dyn Fn() + Send + Sync>>,
+    /// Runs after a successful `settings_update`.
+    after_update: Option<Box<dyn Fn() + Send + Sync>>,
+    /// Runs once, right after the next `app_state` call returned.
+    after_app_state: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Flaky {
@@ -385,6 +500,8 @@ impl Flaky {
             fail_update: None,
             fail_override: None,
             before_update: None,
+            after_update: None,
+            after_app_state: std::sync::Mutex::new(None),
         }
     }
 }
@@ -392,7 +509,12 @@ impl Flaky {
 #[async_trait::async_trait]
 impl DriverClient for Flaky {
     async fn app_state(&self) -> Result<AppState, DriverError> {
-        self.inner.app_state().await
+        let state = self.inner.app_state().await;
+        let hook = self.after_app_state.lock().unwrap().take();
+        if let Some(f) = hook {
+            f();
+        }
+        state
     }
     async fn capabilities(&self) -> Result<DriverCapabilities, DriverError> {
         self.inner.capabilities().await
@@ -426,7 +548,11 @@ impl DriverClient for Flaky {
         if let Some(f) = &self.before_update {
             f();
         }
-        self.inner.settings_update(values).await
+        self.inner.settings_update(values).await?;
+        if let Some(f) = &self.after_update {
+            f();
+        }
+        Ok(())
     }
     async fn settings_override(
         &self,
@@ -512,13 +638,37 @@ async fn second_write_failure_is_partially_applied() {
 }
 
 #[tokio::test]
-async fn interleaved_user_edit_breaks_the_snapshot_check() {
+async fn edit_between_the_state_read_and_the_refresh_is_a_conflict() {
     let mock = Arc::new(MockDriver::new());
     mock.user_edit("wall_loops", "2"); // the snapshot id is now Some
-    let mut flaky = Flaky::new(&mock);
-    // A user edit lands just before the write: two snapshots instead of one.
+    let flaky = Arc::new(Flaky::new(&mock));
+    let t = tools_over(flaky.clone());
+    let rev = revision(&t).await;
+    // The user edits right after the pipeline read `app_state` (and with it
+    // the pre-mutation `undo_snapshot`), before its revision refresh.
     let m2 = mock.clone();
-    flaky.before_update = Some(Box::new(move || m2.user_edit("top_shell_layers", "5")));
+    *flaky.after_app_state.lock().unwrap() =
+        Some(Box::new(move || m2.user_edit("top_shell_layers", "5")));
+    let e = t
+        .studio_set_settings(args(vec![change("layer_height", json!(0.16))], rev, None))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ToolErrorCode::RevisionConflict);
+    assert_eq!(e.http_status, 409);
+    assert_eq!(e.details["reason"], "revision_mismatch");
+    assert!(e.details["current"].as_u64().unwrap() > rev);
+    assert_eq!(writes(&mock), 0);
+}
+
+#[tokio::test]
+async fn undo_during_the_write_reports_applied_and_do_not_retry() {
+    let mock = Arc::new(MockDriver::new());
+    mock.user_edit("wall_loops", "2");
+    let mut flaky = Flaky::new(&mock);
+    // The user presses Ctrl+Z right after the write: the active snapshot ends
+    // up before where the write alone would have put it.
+    let m2 = mock.clone();
+    flaky.after_update = Some(Box::new(move || m2.user_undo()));
     let t = tools_over(Arc::new(flaky));
     let rev = revision(&t).await;
     let e = t
@@ -526,9 +676,117 @@ async fn interleaved_user_edit_breaks_the_snapshot_check() {
         .await
         .unwrap_err();
     assert_eq!(e.code, ToolErrorCode::RevisionConflict);
-    assert_eq!(e.http_status, 409);
     assert_eq!(e.details["reason"], "undo_snapshot_mismatch");
-    assert!(e.details["current"].as_u64().unwrap() > rev);
+    assert_eq!(e.details["outcome"], "applied");
+    assert_eq!(e.details["applied"][0]["key"], "layer_height");
+    assert!(e.details["applied"][0]["applied"].is_string());
+    assert!(e.message.contains("Do not retry blindly"));
+    assert!(e.details["current"].as_u64().unwrap() >= rev);
+}
+
+#[tokio::test]
+async fn write_after_a_user_undo_is_not_a_false_conflict() {
+    let mock = Arc::new(MockDriver::new());
+    mock.user_edit("wall_loops", "2");
+    mock.user_edit("top_shell_layers", "4");
+    mock.user_undo(); // active snapshot goes back; the next one jumps over it
+    let t = tools_with(&mock);
+    let rev = revision(&t).await;
+    let v = t
+        .studio_set_settings(args(demo(), rev, None))
+        .await
+        .unwrap();
+    assert_eq!(v["applied"][2]["applied"], "4");
+    // And again with two writes.
+    mock.user_undo();
+    let rev = revision(&t).await;
+    t.studio_set_settings(args(
+        vec![
+            change("layer_height", json!(0.16)),
+            object_change("wall_loops", json!(6), "obj-1"),
+        ],
+        rev,
+        None,
+    ))
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn partial_failure_also_runs_the_snapshot_check() {
+    let mock = Arc::new(MockDriver::new());
+    mock.user_edit("wall_loops", "2");
+    let mut flaky = Flaky::new(&mock);
+    flaky.fail_override = Some(DriverError::Native {
+        code: "X".to_string(),
+        message: "boom".to_string(),
+    });
+    let m2 = mock.clone();
+    flaky.after_update = Some(Box::new(move || m2.user_undo()));
+    let t = tools_over(Arc::new(flaky));
+    let rev = revision(&t).await;
+    let e = t
+        .studio_set_settings(args(
+            vec![
+                change("layer_height", json!(0.16)),
+                object_change("wall_loops", json!(6), "obj-1"),
+            ],
+            rev,
+            None,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ToolErrorCode::PartiallyApplied);
+    assert!(e.details["concurrent_edit"]["undo_snapshot"]["after"].is_string());
+}
+
+#[tokio::test]
+async fn stale_reference_on_a_plate_override_is_409_or_207() {
+    let stale = || DriverError::StaleReference {
+        message: "plate revision is outdated".to_string(),
+    };
+    // First (only) group: nothing written, standard 409 shape.
+    let mock = Arc::new(MockDriver::new());
+    let mut flaky = Flaky::new(&mock);
+    flaky.fail_override = Some(stale());
+    let t = tools_over(Arc::new(flaky));
+    let rev = revision(&t).await;
+    let e = t
+        .studio_set_settings(args(
+            vec![plate_change("sparse_infill_density", json!(50), 0)],
+            rev,
+            None,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ToolErrorCode::RevisionConflict);
+    assert_eq!(e.http_status, 409);
+    let current = e.details["current"].as_u64().unwrap();
+    assert_eq!(e.details["expected"], rev);
+    assert_eq!(e.details["state"]["revision"].as_u64().unwrap(), current);
+
+    // Second group: the project part is applied, so 207.
+    let mock = Arc::new(MockDriver::new());
+    let mut flaky = Flaky::new(&mock);
+    flaky.fail_override = Some(stale());
+    let t = tools_over(Arc::new(flaky));
+    let rev = revision(&t).await;
+    let e = t
+        .studio_set_settings(args(
+            vec![
+                change("layer_height", json!(0.16)),
+                plate_change("sparse_infill_density", json!(50), 0),
+            ],
+            rev,
+            None,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ToolErrorCode::PartiallyApplied);
+    assert_eq!(e.http_status, 207);
+    assert_eq!(e.details["applied"][0]["key"], "layer_height");
+    assert_eq!(e.details["failed"][0]["error"]["code"], "REVISION_CONFLICT");
+    assert_eq!(e.details["failed"][0]["target"], json!({"plate_id": 0}));
 }
 
 #[tokio::test]

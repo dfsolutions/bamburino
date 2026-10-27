@@ -26,6 +26,8 @@ const INSTANCE_ID: &str = "inst-1";
 
 #[derive(Clone)]
 struct Snapshot {
+    /// Logical time this snapshot was stored at (`m_current_time` in Studio).
+    time: u64,
     settings: BTreeMap<String, String>,
     plate_overrides: BTreeMap<String, String>,
     object_overrides: BTreeMap<String, String>,
@@ -62,7 +64,10 @@ struct State {
     dirty: bool,
     // undo
     snapshots: Vec<Snapshot>,
-    snapshot_time: u64,
+    /// Like `UndoRedo::StackImpl`: `current_time` only grows, `active_time`
+    /// is what `undoSnapshot` reports and moves back on undo.
+    current_time: u64,
+    active_time: u64,
     undo_snapshot: Option<String>,
     undo_snapshot_supported: bool,
     // plate revisions: revision string -> edit epoch at issue time
@@ -166,13 +171,17 @@ impl State {
     /// invalidates every issued plate revision.
     fn take_snapshot(&mut self) {
         self.snapshots.push(Snapshot {
+            time: self.current_time,
             settings: self.settings.clone(),
             plate_overrides: self.plate_overrides.clone(),
             object_overrides: self.object_overrides.clone(),
             instance: self.instance.clone(),
         });
-        self.snapshot_time += 1;
-        self.undo_snapshot = Some(self.snapshot_time.to_string());
+        // `m_active_snapshot_time = ++m_current_time`: after an undo the new
+        // snapshot jumps over the undone ones.
+        self.current_time += 1;
+        self.active_time = self.current_time;
+        self.undo_snapshot = Some(self.active_time.to_string());
         self.epoch += 1;
         self.dirty = true;
         self.invalidate_slice();
@@ -241,7 +250,8 @@ impl MockDriver {
                 instance: cube_instance(),
                 dirty: false,
                 snapshots: Vec::new(),
-                snapshot_time: 0,
+                current_time: 0,
+                active_time: 0,
                 undo_snapshot: None,
                 epoch: 0,
                 revision_counter: 0,
@@ -272,7 +282,7 @@ impl MockDriver {
     }
 
     /// Simulates the user pressing undo: restores the last snapshot and
-    /// changes `undo_snapshot`.
+    /// moves `undo_snapshot` back to its time (a later edit jumps over it).
     pub fn user_undo(&self) {
         let mut st = self.lock();
         if let Some(snap) = st.snapshots.pop() {
@@ -280,9 +290,11 @@ impl MockDriver {
             st.plate_overrides = snap.plate_overrides;
             st.object_overrides = snap.object_overrides;
             st.instance = snap.instance;
+            // Undo moves the active time back to the restored snapshot; the
+            // current time is not decremented.
+            st.active_time = snap.time;
+            st.undo_snapshot = Some(snap.time.to_string());
         }
-        st.snapshot_time += 1;
-        st.undo_snapshot = Some(st.snapshot_time.to_string());
         st.epoch += 1;
         st.invalidate_slice();
     }

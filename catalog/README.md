@@ -19,3 +19,7 @@ Notes for consumers:
 - Options also carry `default_evidence`, `source_line`, `generated_from` and `ratio_over`; consumers must not
   use `deny_unknown_fields`.
 - `extruder` is a deliberate scope exception: it gets the PrintRegionConfig scopes although no such class declares it.
+- Scope rule: `PrintObjectConfig` keys get `project, plate, object`; `PrintRegionConfig` keys get
+  `project, plate, object, volume, height_range`; other classes get `project` only. Exceptions: the six plate-only
+  keys (`print_sequence`, ...) get `project, plate`, and `initial_layer_print_height`, `skirt_loops`, `travel_speed`
+  (global classes, but in the driver's 19-key override whitelist) also get `plate`.

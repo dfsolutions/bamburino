@@ -2,6 +2,7 @@
 """Tests for catalog/build_catalog.py. Run from the repo root after fetch_sources.py."""
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -52,14 +53,22 @@ class CatalogTest(unittest.TestCase):
 
     def test_class_scope_rule(self):
         o = self.c["options"]
-        self.assertEqual(o["layer_height"]["scopes"], ["project", "object"])          # PrintObjectConfig
-        self.assertEqual(o["wall_loops"]["scopes"][:2], ["project", "object"])       # PrintRegionConfig
+        self.assertEqual(o["layer_height"]["scopes"], ["project", "plate", "object"])  # PrintObjectConfig
+        self.assertEqual(o["wall_loops"]["scopes"][:3], ["project", "plate", "object"])  # PrintRegionConfig
         self.assertIn("volume", o["wall_loops"]["scopes"])
         self.assertEqual(o["print_sequence"]["scopes"][0], "project")                # global (+ plate)
         self.assertNotIn("object", o["print_sequence"]["scopes"])
         for k, v in o.items():
             if v["scopes"]:
                 self.assertIn("project", v["scopes"], k)
+
+    def test_every_driver_override_key_has_plate_scope(self):
+        source = (ROOT / "service/crates/bamburino-core/src/driver/map.rs").read_text(encoding="utf-8")
+        block = source[source.index("pub const OVERRIDE_KEYS"):]
+        keys = re.findall(r'"(\w+)"', block[:block.index("];")])
+        self.assertEqual(len(keys), 19)
+        for k in keys:
+            self.assertIn("plate", self.c["options"][k]["scopes"], k)
 
     def test_demo_keys(self):
         o = self.c["options"]

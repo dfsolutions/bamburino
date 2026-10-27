@@ -109,17 +109,22 @@ def generate(source, revision):
                   "source_line": raw[:raw.index('"' + key + '"', raw.index("void PrintConfigDef::init_common_params()"))].count("\n") + 1}
         # `extruder` is a deliberate exception: it is not declared in PrintObjectConfig/PrintRegionConfig
         # but is assignable per object, volume and height range, so it gets the region scopes.
-        # Fixed class->scope rule: PrintObjectConfig -> project+object; PrintRegionConfig ->
-        # project+object+volume+height_range; any other (global) class -> project only.
+        # Fixed class->scope rule: PrintObjectConfig -> project+plate+object; PrintRegionConfig ->
+        # project+plate+object+volume+height_range (a plate carries the same per-object-class overrides);
+        # any other (global) class -> project only, plus the plate keys listed below.
+        plate_only_keys = {"curr_bed_type", "print_sequence", "spiral_mode", "first_layer_print_sequence",
+                           "other_layers_print_sequence", "other_layers_print_sequence_nums"}
+        # Keys of the driver's 19-key `override_settings()` whitelist (docs/driver-audit.md, item 5) that
+        # belong to global classes: the driver still accepts them in a plate override.
+        plate_override_extra = {"initial_layer_print_height", "skirt_loops", "travel_speed"}
+        if key in object_keys or key in region_keys or key in plate_only_keys or key in plate_override_extra:
+            option["scopes"].append("plate")
         if key in object_keys or key in region_keys or key == "extruder":
             option["scopes"].append("object")
         if key in region_keys or key == "extruder":
             option["scopes"] += ["volume", "height_range"]
         if key.startswith("filament_"):
             option["scopes"].append("filament")
-        # PlateConfig is a separate persisted schema; only its defined keys are writable there.
-        if key in {"curr_bed_type", "print_sequence", "spiral_mode", "first_layer_print_sequence", "other_layers_print_sequence", "other_layers_print_sequence_nums"}:
-            option["scopes"].append("plate")
         for field, dest in [("label", "label"), ("tooltip", "description"), ("category", "category"),
                             ("sidetext", "units"), ("ratio_over", "ratio_over")]:
             vals = re.findall(r'def->' + field + r'\s*=\s*([\s\S]*?);', block)

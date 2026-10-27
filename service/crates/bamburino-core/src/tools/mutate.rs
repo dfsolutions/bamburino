@@ -146,12 +146,24 @@ pub(crate) fn write_error(e: DriverError) -> ToolError {
     }
 }
 
-/// True when `after` is `before` plus `n` snapshots. Ids are opaque; when
-/// both are numbers the exact distance is checked, otherwise only that the id
-/// changed.
-fn advanced_by(before: &str, after: &str, n: u32) -> bool {
+/// Whether `undo_snapshot` moved the way `n` successful snapshotting calls
+/// move it. Ids are opaque, and the numbers follow `UndoRedo::StackImpl`:
+/// `take_snapshot` sets the active time to `++m_current_time`, while a user
+/// undo moves the active time back without decrementing the current time. So
+/// after an undo the next snapshot jumps over the undone ones and the distance
+/// is NOT exactly `n`; a distance of exactly `n` holds only when the active
+/// snapshot was the topmost, which the service cannot know. The rule is
+/// therefore a lower bound: with numeric ids `after >= before + n` (and
+/// `after == before` when nothing was written); with opaque ids the id must
+/// have changed (resp. not changed). An edit that lands between the
+/// pre-mutation read and the refresh is caught by the revision comparison,
+/// not by this check; one that lands during the write and adds a snapshot is
+/// not distinguishable from an undo jump.
+fn advance_ok(before: &str, after: &str, n: u32) -> bool {
     match (before.parse::<u64>(), after.parse::<u64>()) {
-        (Ok(b), Ok(a)) => a == b + u64::from(n),
+        (Ok(b), Ok(a)) if n == 0 => a == b,
+        (Ok(b), Ok(a)) => a >= b + u64::from(n),
+        _ if n == 0 => before == after,
         _ => before != after,
     }
 }
@@ -168,9 +180,19 @@ fn busy_reason(app: &AppState) -> Option<&'static str> {
     }
 }
 
+fn snapshot_ok(before: &Option<String>, after: &Option<String>, n: u32) -> bool {
+    match (before, after) {
+        (Some(b), Some(a)) => advance_ok(b, a, n),
+        (Some(_), None) => n == 0,
+        // No snapshot id before the call: nothing to compare with.
+        (None, _) => true,
+    }
+}
+
 impl Tools {
     /// Runs `apply` under the mutation pipeline (module docs) and returns its
     /// result with the revision issued right after the mutation.
+    #[allow(dead_code)] // for the single-write tools that follow (transform, supports)
     pub(crate) async fn guarded_mutation<F, Fut, T>(
         &self,
         expected_revision: u64,
@@ -179,6 +201,28 @@ impl Tools {
     where
         F: FnOnce(Arc<dyn DriverClient>) -> Fut,
         Fut: Future<Output = Result<T, ToolError>>,
+    {
+        let (value, _, revision) = self
+            .guarded_mutation_with(expected_revision, apply, || async { Ok(()) })
+            .await?;
+        Ok((value, revision))
+    }
+
+    /// Like [`Self::guarded_mutation`], plus `read_back`, which runs inside the
+    /// critical section right after the post-mutation refresh. Its result is
+    /// returned, and is included in the error when the snapshot check fails.
+    pub(crate) async fn guarded_mutation_with<F, Fut, T, G, GFut, R>(
+        &self,
+        expected_revision: u64,
+        apply: F,
+        read_back: G,
+    ) -> Result<(T, R, u64), ToolError>
+    where
+        F: FnOnce(Arc<dyn DriverClient>) -> Fut,
+        Fut: Future<Output = Result<T, ToolError>>,
+        G: FnOnce() -> GFut,
+        GFut: Future<Output = Result<R, ToolError>>,
+        R: serde::Serialize,
     {
         self.revision.touch_client();
         let _serial = self.write_lock.lock().await;
@@ -193,6 +237,9 @@ impl Tools {
             )
             .with_details(json!({ "reason": reason })));
         }
+        // Read before the refresh: an edit landing in between changes the
+        // revision (caught below) or makes the snapshot advance by more.
+        let before = app.undo_snapshot;
         let current = self
             .revision
             .refresh(self.driver.as_ref())
@@ -209,18 +256,47 @@ impl Tools {
                 )
                 .await);
         }
-        let before = self
-            .driver
-            .app_state()
-            .await
-            .map_err(read_error)?
-            .undo_snapshot;
 
         let counting = Arc::new(CountingDriver {
             inner: self.driver.clone(),
             snapshots: AtomicU32::new(0),
         });
-        let value = apply(counting.clone()).await?;
+        let value = match apply(counting.clone()).await {
+            Ok(v) => v,
+            Err(mut e) => {
+                let stale = e.code == ToolErrorCode::RevisionConflict
+                    && e.details["reason"] == "stale_reference";
+                if stale {
+                    let cur = self
+                        .revision
+                        .refresh(self.driver.as_ref())
+                        .await
+                        .unwrap_or(current);
+                    return Err(self
+                        .conflict(
+                            "stale_reference",
+                            expected_revision,
+                            cur,
+                            "The project changed while the change was being applied. Review `details.state` and retry with `details.current`.",
+                            json!({}),
+                        )
+                        .await);
+                }
+                if e.code == ToolErrorCode::PartiallyApplied {
+                    let n = counting.snapshots.load(Ordering::SeqCst);
+                    if let Ok(post) = self.driver.app_state().await
+                        && !snapshot_ok(&before, &post.undo_snapshot, n)
+                    {
+                        e.details["concurrent_edit"] = json!({
+                            "undo_snapshot": { "before": before, "after": post.undo_snapshot, "expected_advance": n },
+                        });
+                        e.message
+                            .push_str(" A concurrent edit was also detected in the undo history.");
+                    }
+                }
+                return Err(e);
+            }
+        };
 
         // Immediately after the mutation: see the race-window contract.
         let unverified = |e: DriverError| {
@@ -240,24 +316,24 @@ impl Tools {
             .map_err(unverified)?
             .undo_snapshot;
         let n = counting.snapshots.load(Ordering::SeqCst);
-        let ok = match (&before, &after) {
-            (Some(b), Some(a)) => advanced_by(b, a, n),
-            (Some(_), None) => n == 0,
-            // No snapshot id before the call: nothing to compare with.
-            (None, _) => true,
-        };
-        if !ok {
+        let read = read_back().await;
+        if !snapshot_ok(&before, &after, n) {
+            let applied = read.ok().and_then(|r| serde_json::to_value(r).ok());
             return Err(self
                 .conflict(
                     "undo_snapshot_mismatch",
                     expected_revision,
                     revision,
-                    "The change was applied, but the undo history moved by more than the change itself: the project was edited while the change ran. Review `details.state`.",
-                    json!({ "undo_snapshot": { "before": before, "after": after, "expected_advance": n } }),
+                    "The change WAS applied, but the undo history does not move as the change alone would: a concurrent edit was detected. Do not retry blindly; review `details.applied` and `details.state` first.",
+                    json!({
+                        "outcome": "applied",
+                        "applied": applied,
+                        "undo_snapshot": { "before": before, "after": after, "expected_advance": n },
+                    }),
                 )
                 .await);
         }
-        Ok((value, revision))
+        Ok((value, read?, revision))
     }
 
     async fn conflict(
@@ -291,43 +367,45 @@ impl Tools {
         self.revision.touch_client();
         let plan = build_plan(self, &a.changes)?;
         let dry_run = a.dry_run.unwrap_or(false);
-        let (from, revision) = self
-            .guarded_mutation(a.expected_revision, |drv| {
-                self.apply_plan(drv, &plan, dry_run)
-            })
+        let (from, applied, revision) = self
+            .guarded_mutation_with(
+                a.expected_revision,
+                |drv| self.apply_plan(drv, &plan, dry_run),
+                || async {
+                    if dry_run {
+                        return Ok(Vec::new());
+                    }
+                    let now = self.read_all(&self.driver, &plan).await.map_err(|mut e| {
+                        e.details["outcome"] = json!("applied_unverified");
+                        e
+                    })?;
+                    Ok(plan
+                        .items
+                        .iter()
+                        .zip(&now)
+                        .map(|(i, v)| i.applied_json(v))
+                        .collect::<Vec<Value>>())
+                },
+            )
             .await?;
 
-        let applied: Vec<Value>;
-        let to: Vec<String>;
-        if dry_run {
-            applied = Vec::new();
-            to = plan.items.iter().map(|i| i.native.clone()).collect();
-        } else {
-            let now = self.read_all(&self.driver, &plan).await.map_err(|mut e| {
-                e.details["outcome"] = json!("applied_unverified");
-                e.details["revision"] = json!(revision);
-                e
-            })?;
-            to = now;
-            applied = plan
-                .items
-                .iter()
-                .zip(&to)
-                .map(|(i, v)| i.applied_json(v))
-                .collect();
-        }
         let diff: Vec<Value> = plan
             .items
             .iter()
-            .zip(from.iter().zip(&to))
-            .map(|(i, (f, t))| {
+            .zip(&from)
+            .enumerate()
+            .map(|(n, (i, f))| {
+                let to = applied
+                    .get(n)
+                    .and_then(|a| a["applied"].as_str())
+                    .unwrap_or(&i.native);
                 json!({
                     "key": i.key,
                     "scope": i.scope,
                     "target": i.target,
                     "from": f,
-                    "to": t,
-                    "changed": f != t,
+                    "to": to,
+                    "changed": f != to,
                 })
             })
             .collect();
@@ -351,10 +429,13 @@ impl Tools {
         // Writability, against the driver's own list for the project scope.
         let project_keys: BTreeSet<String> = match drv.writable_keys().await {
             Ok(k) => k,
-            Err(_) => crate::driver::map::WRITABLE_KEYS
+            // Only a driver without the method falls back to the static list;
+            // a timeout or a stale state must not be papered over.
+            Err(DriverError::NotAllowed { .. }) => crate::driver::map::WRITABLE_KEYS
                 .iter()
                 .map(|k| k.to_string())
                 .collect(),
+            Err(e) => return Err(read_error(e)),
         };
         let mut errors: Vec<(ToolErrorCode, Value)> = Vec::new();
         let mut keys: Vec<&str> = Vec::new();
