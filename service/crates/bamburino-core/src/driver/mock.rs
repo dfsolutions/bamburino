@@ -4,9 +4,11 @@
 //! Mirrors the observable behaviour of the real driver that the service
 //! depends on: whitelists, a fresh `plateRevision` per `plate_list` that goes
 //! stale on any edit, a modal-dialog gate on mutations, undo snapshots, and a
-//! slice job that needs two polls to succeed.
+//! slice job that needs two polls to succeed, and `export_gcode` writing a
+//! realistic Bambu header.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -80,6 +82,15 @@ struct State {
     valid_result: Option<(String, u32)>,
     summary_stats: SummaryStats,
     estimated_time_s: Option<f64>,
+    // plates
+    plate_count: u32,
+    selected_plate: u32,
+    // export_gcode
+    gcode_header: bool,
+    exported: Vec<PathBuf>,
+    export_counter: u64,
+    /// Targeted faults: (tool, error, remaining times).
+    tool_failures: Vec<(DriverTool, DriverError, u32)>,
 }
 
 /// Scriptable in-memory driver. All methods take `&self`.
@@ -157,12 +168,14 @@ impl State {
         let revision = format!("mock-session:{}", self.revision_counter);
         self.issued.insert(revision.clone(), self.epoch);
         PlateList {
-            plates: vec![Plate {
-                index: 0,
-                name: "Plate 1".to_string(),
-                locked: false,
-            }],
-            selected_index: 0,
+            plates: (0..self.plate_count)
+                .map(|index| Plate {
+                    index,
+                    name: format!("Plate {}", index + 1),
+                    locked: false,
+                })
+                .collect(),
+            selected_index: self.selected_plate,
             plate_revision: revision,
         }
     }
@@ -199,8 +212,8 @@ impl State {
         }
     }
 
-    fn check_plate(index: u32) -> Result<(), DriverError> {
-        if index == 0 {
+    fn check_plate(&self, index: u32) -> Result<(), DriverError> {
+        if index < self.plate_count {
             Ok(())
         } else {
             Err(DriverError::InvalidParams {
@@ -261,6 +274,12 @@ impl MockDriver {
                 valid_result: None,
                 summary_stats: SummaryStats::default(),
                 estimated_time_s: Some(1800.0),
+                plate_count: 1,
+                selected_plate: 0,
+                gcode_header: true,
+                exported: Vec::new(),
+                export_counter: 0,
+                tool_failures: Vec::new(),
             }),
         }
     }
@@ -317,6 +336,28 @@ impl MockDriver {
     /// Overrides `statistics.estimatedNormalTime` reported by `slice_state`.
     pub fn set_estimated_time(&self, seconds: Option<f64>) {
         self.lock().estimated_time_s = seconds;
+    }
+
+    /// Number of plates the mock reports (default 1). Plate 0 is selected.
+    pub fn set_plate_count(&self, count: u32) {
+        self.lock().plate_count = count.max(1);
+    }
+
+    /// Whether the exported G-code carries the Bambu header with the filament
+    /// totals (default true; it is only written when filaments are set).
+    pub fn set_gcode_header(&self, present: bool) {
+        self.lock().gcode_header = present;
+    }
+
+    /// Paths `export_gcode` was asked to write, in order.
+    pub fn exported_paths(&self) -> Vec<PathBuf> {
+        self.lock().exported.clone()
+    }
+
+    /// The next `times` calls of `tool` fail with `err` (after the usual
+    /// prologue, so they are recorded in `calls`).
+    pub fn fail_tool(&self, tool: DriverTool, err: DriverError, times: u32) {
+        self.lock().tool_failures.push((tool, err, times));
     }
 
     /// Whether `app_get_state` reports `undoSnapshot` (plan A patch 0120).
@@ -388,7 +429,15 @@ impl MockDriver {
         if let Some(err) = fail {
             return Err(err);
         }
-        let st = self.lock();
+        let mut st = self.lock();
+        if let Some(pos) = st
+            .tool_failures
+            .iter()
+            .position(|(t, _, n)| *t == tool && *n > 0)
+        {
+            st.tool_failures[pos].2 -= 1;
+            return Err(st.tool_failures[pos].1.clone());
+        }
         if tool.is_mutation() && (st.modal_open || st.slicing_running()) {
             return Err(DriverError::Busy {
                 message: "a modal dialog is open or a job is running".to_string(),
@@ -413,8 +462,8 @@ impl DriverClient for MockDriver {
             slicing_running: st.slicing_running(),
             modal_open: st.modal_open,
             object_count: 1,
-            plate_count: 1,
-            selected_plate_index: 0,
+            plate_count: st.plate_count,
+            selected_plate_index: st.selected_plate,
             undo_snapshot: st
                 .undo_snapshot_supported
                 .then(|| st.undo_snapshot.clone())
@@ -451,10 +500,11 @@ impl DriverClient for MockDriver {
     ) -> Result<PlateList, DriverError> {
         let mut st = self.enter(DriverTool::PlateSelect).await?;
         st.check_revision(plate_revision)?;
-        State::check_plate(plate_index)?;
+        st.check_plate(plate_index)?;
         // Like the driver, selecting a plate takes an undo snapshot and so
         // invalidates every previously issued plate revision.
         st.take_snapshot();
+        st.selected_plate = plate_index;
         Ok(st.plate_state())
     }
 
@@ -493,7 +543,7 @@ impl DriverClient for MockDriver {
                 plate_revision,
             } => {
                 st.check_revision(plate_revision)?;
-                State::check_plate(*index)?;
+                st.check_plate(*index)?;
                 (Some(&st.plate_overrides), SettingSource::Plate)
             }
             SettingsTarget::Object { object_id } => {
@@ -555,7 +605,7 @@ impl DriverClient for MockDriver {
                 plate_revision,
             } => {
                 st.check_revision(plate_revision)?;
-                State::check_plate(*index)?;
+                st.check_plate(*index)?;
             }
             SettingsTarget::Object { object_id } => {
                 if object_id != OBJECT_ID {
@@ -606,7 +656,13 @@ impl DriverClient for MockDriver {
     ) -> Result<DriverJob, DriverError> {
         let mut st = self.enter(DriverTool::SliceStart).await?;
         st.check_revision(plate_revision)?;
-        State::check_plate(plate_index)?;
+        st.check_plate(plate_index)?;
+        if plate_index != st.selected_plate {
+            return Err(DriverError::InvalidParams {
+                message: "Only the selected plate is supported; select it explicitly first"
+                    .to_string(),
+            });
+        }
         if st.slicing_running() {
             return Err(DriverError::Busy {
                 message: "a slice job is already running".to_string(),
@@ -686,7 +742,7 @@ impl DriverClient for MockDriver {
     ) -> Result<SliceSummary, DriverError> {
         let st = self.enter(DriverTool::PreviewGetSummary).await?;
         st.check_revision(plate_revision)?;
-        State::check_plate(plate_index)?;
+        st.check_plate(plate_index)?;
         match &st.valid_result {
             Some((id, _)) if id == slice_result_id => Ok(SliceSummary {
                 print_time_s: st.summary_stats.print_time_s,
@@ -700,4 +756,77 @@ impl DriverClient for MockDriver {
             }),
         }
     }
+
+    async fn export_gcode(
+        &self,
+        plate_index: u32,
+        plate_revision: &str,
+        slice_result_id: &str,
+        path: &Path,
+    ) -> Result<DriverJob, DriverError> {
+        let mut st = self.enter(DriverTool::ExportGcode).await?;
+        st.check_revision(plate_revision)?;
+        st.check_plate(plate_index)?;
+        match &st.valid_result {
+            Some((id, _)) if id == slice_result_id => {}
+            _ => {
+                return Err(DriverError::StaleReference {
+                    message: format!("slice result {slice_result_id} is not current"),
+                });
+            }
+        }
+        let invalid = |m: &str| DriverError::InvalidParams {
+            message: m.to_string(),
+        };
+        if !path.is_absolute() || path.extension().and_then(|e| e.to_str()) != Some("gcode") {
+            return Err(invalid("Export requires an absolute .gcode path"));
+        }
+        if !path.parent().is_some_and(Path::is_dir) {
+            return Err(invalid("Export parent directory does not exist"));
+        }
+        if path.exists() {
+            return Err(invalid("Destination exists; explicitly set overwrite=true"));
+        }
+        let text = gcode_text(&st.summary_stats.filaments, st.gcode_header);
+        std::fs::write(path, text).map_err(|e| DriverError::Native {
+            code: "NATIVE_ERROR".to_string(),
+            message: e.to_string(),
+        })?;
+        st.exported.push(path.to_path_buf());
+        st.export_counter += 1;
+        Ok(DriverJob {
+            id: format!("mock-export-{}", st.export_counter),
+            plate_index,
+            status: JobStatus::Succeeded,
+            progress_percent: Some(100),
+            message: None,
+            error: None,
+            slice_result_id: Some(slice_result_id.to_string()),
+            reused: false,
+        })
+    }
+}
+
+/// A realistic Bambu G-code head: header block with the per-filament totals
+/// (when `header` and there are filaments), then some moves.
+fn gcode_text(filaments: &[FilamentUsage], header: bool) -> String {
+    let mut out = String::from("; HEADER_BLOCK_START\n; BambuStudio 02.05.00.66\n");
+    if header && !filaments.is_empty() {
+        let join = |f: &dyn Fn(&FilamentUsage) -> f64| {
+            filaments
+                .iter()
+                .map(|u| format!("{:.2}", f(u)))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let mm = join(&|u| u.meters.unwrap_or(0.0) * 1000.0);
+        let g = join(&|u| u.grams.unwrap_or(0.0));
+        // PLA density 1.24 g/cm3.
+        let cm3 = join(&|u| u.grams.unwrap_or(0.0) / 1.24);
+        out.push_str(&format!(
+            "; total filament length [mm] : {mm}\n; total filament volume [cm^3] : {cm3}\n; total filament weight [g] : {g}\n"
+        ));
+    }
+    out.push_str("; HEADER_BLOCK_END\nG1 X10 Y10 E1\n");
+    out
 }

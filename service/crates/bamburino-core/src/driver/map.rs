@@ -19,6 +19,7 @@
 //! | `job_get` / `job_cancel` | `job_get` / `job_cancel` | `{jobId}` |
 //! | `slice_state` | `slice_get_state` | `{}` (`busy`, `valid`, `sliceResultId`, `plateIndex`, `statistics.estimatedNormalTime` -> print time) |
 //! | `preview_summary` | `preview_get_summary` | `{plateIndex, expectedPlateRevision, sliceResultId}`; returns move counts and warnings only. Print time comes from `slice_get_state`; filament usage (grams/meters) and support volume: source TBD by audit (Task 18) |
+//! | `export_gcode` | `export_gcode` | `{plateIndex, expectedPlateRevision, sliceResultId, path, overwrite: false}`; absolute `.gcode` path in an existing directory; the only `export_*` tool on the allowlist. Used by `studio_get_slice_summary` to read grams/meters/volume from the header of a temp file, which is deleted afterwards |
 //!
 //! `model_import` takes no undo snapshot and is not part of the trait.
 

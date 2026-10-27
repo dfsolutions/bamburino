@@ -143,3 +143,26 @@ pub struct SupportsArgs {
     /// The `revision` from the last read; a mismatch returns 409 and writes nothing.
     pub expected_revision: u64,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SliceArgs {
+    /// Plate number as reported by `studio_get_state` (`plates[].plate_id`).
+    /// Default: the selected plate. A different plate is selected first.
+    pub plate_id: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JobArgs {
+    /// Job id returned by `studio_slice`.
+    pub job_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SummaryArgs {
+    /// Plate to summarize. Default: the selected plate, which is the only one
+    /// that can hold a current slice result.
+    pub plate_id: Option<u32>,
+}

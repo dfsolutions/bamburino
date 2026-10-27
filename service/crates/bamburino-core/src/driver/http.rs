@@ -835,6 +835,26 @@ impl DriverClient for HttpDriverClient {
             raw,
         })
     }
+
+    async fn export_gcode(
+        &self,
+        plate_index: u32,
+        plate_revision: &str,
+        slice_result_id: &str,
+        path: &std::path::Path,
+    ) -> Result<DriverJob, DriverError> {
+        let path = path.to_str().ok_or_else(|| DriverError::InvalidParams {
+            message: "export path is not valid UTF-8".to_string(),
+        })?;
+        let args = json!({
+            "plateIndex": plate_index,
+            "expectedPlateRevision": plate_revision,
+            "sliceResultId": slice_result_id,
+            "path": path,
+            "overwrite": false,
+        });
+        parse_job(&self.call(DriverTool::ExportGcode, args).await?)
+    }
 }
 
 #[cfg(test)]

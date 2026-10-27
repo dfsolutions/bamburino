@@ -33,10 +33,25 @@ fn driver_tool_allowlist_excludes_physical_and_global() {
     for tool in DriverTool::ALL {
         let name = tool.name();
         for prefix in banned {
+            // `export_gcode` is the one permitted export tool.
+            if name == "export_gcode" {
+                continue;
+            }
             assert!(!name.starts_with(prefix), "{name} starts with {prefix}");
         }
         assert_ne!(name, "preset_select");
     }
+}
+
+#[test]
+fn export_gcode_is_the_only_export_tool_on_the_allowlist() {
+    let exports: Vec<_> = DriverTool::ALL
+        .iter()
+        .map(|t| t.name())
+        .filter(|n| n.contains("export"))
+        .collect();
+    assert_eq!(exports, ["export_gcode"]);
+    assert!(DriverTool::ExportGcode.is_mutation());
 }
 
 #[test]

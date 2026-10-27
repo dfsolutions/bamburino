@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Allowlist of driver tools the service may call.
 //!
-//! Physical-device, account, calibration, project, export, history and
-//! preference tools of the driver are deliberately not representable: this
+//! Physical-device, account, calibration, project, history and preference
+//! tools of the driver are deliberately not representable, and of the export
+//! tools only `export_gcode` is (to a temp file, to read the filament usage
+//! out of its header): this
 //! enum is the only way to build a `tools/call` request.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -23,10 +25,11 @@ pub enum DriverTool {
     JobGet,
     JobCancel,
     PreviewGetSummary,
+    ExportGcode,
 }
 
 impl DriverTool {
-    pub const ALL: [DriverTool; 16] = [
+    pub const ALL: [DriverTool; 17] = [
         Self::AppGetCapabilities,
         Self::AppGetState,
         Self::PlateList,
@@ -43,6 +46,7 @@ impl DriverTool {
         Self::JobGet,
         Self::JobCancel,
         Self::PreviewGetSummary,
+        Self::ExportGcode,
     ];
 
     /// Tool name as exposed by the driver (snake_case).
@@ -64,6 +68,7 @@ impl DriverTool {
             Self::JobGet => "job_get",
             Self::JobCancel => "job_cancel",
             Self::PreviewGetSummary => "preview_get_summary",
+            Self::ExportGcode => "export_gcode",
         }
     }
 
@@ -78,6 +83,7 @@ impl DriverTool {
                 | Self::SettingsOverride
                 | Self::ObjectTransform
                 | Self::SliceStart
+                | Self::ExportGcode
         )
     }
 }

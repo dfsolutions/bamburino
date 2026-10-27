@@ -751,3 +751,37 @@ async fn presets_writable_keys_and_preview() {
     assert_eq!(s.warnings, ["careful"]);
     assert_eq!(s.raw["moveCount"], 10);
 }
+
+#[tokio::test]
+async fn export_gcode_sends_path_and_never_overwrites() {
+    let server = MockServer::start().await;
+    mount_handshake(&server).await;
+    mount_tool(
+        &server,
+        "export_gcode",
+        tool_ok(json!({
+            "jobId":"e1","kind":"export_gcode","plateIndex":0,"status":"succeeded","progressPercent":100,
+            "message":"","error":null,"result":{"sliceResultId":"r1","path":"a.gcode","bytes":10}
+        })),
+    )
+    .await;
+    let client = HttpDriverClient::new(config(&server)).unwrap();
+    let path = std::env::temp_dir().join("a.gcode");
+    let j = client.export_gcode(0, "rev", "r1", &path).await.unwrap();
+    assert_eq!(j.status, JobStatus::Succeeded);
+    let calls: Vec<Value> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| serde_json::from_slice::<Value>(&r.body).unwrap())
+        .filter(|v| v["params"]["name"] == "export_gcode")
+        .collect();
+    assert_eq!(calls.len(), 1);
+    let args = &calls[0]["params"]["arguments"];
+    assert_eq!(args["plateIndex"], 0);
+    assert_eq!(args["expectedPlateRevision"], "rev");
+    assert_eq!(args["sliceResultId"], "r1");
+    assert_eq!(args["path"], path.to_str().unwrap());
+    assert_eq!(args["overwrite"], false);
+}

@@ -5,6 +5,7 @@
 pub mod args;
 mod mutate;
 mod read;
+mod slice;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,8 +17,9 @@ use crate::errors::{ToolError, ToolErrorCode};
 use crate::revision::RevisionState;
 
 pub use args::{
-    Change, GetSettingsArgs, SearchArgs, SetSettingsArgs, SupportKind, SupportSettings,
-    SupportStyle, SupportTarget, SupportsArgs, TargetRef, Transform, TransformArgs, TransformMode,
+    Change, GetSettingsArgs, JobArgs, SearchArgs, SetSettingsArgs, SliceArgs, SummaryArgs,
+    SupportKind, SupportSettings, SupportStyle, SupportTarget, SupportsArgs, TargetRef, Transform,
+    TransformArgs, TransformMode,
 };
 pub use mutate::compose_rotation_deg;
 
@@ -39,6 +41,8 @@ pub struct Tools {
     pub(crate) cfg: ToolConfig,
     /// Serializes mutations (revision check + write + refresh).
     pub(crate) write_lock: tokio::sync::Mutex<()>,
+    /// Slice jobs started through this service: job id -> plate index.
+    pub(crate) jobs: std::sync::Mutex<std::collections::HashMap<String, u32>>,
 }
 
 impl Tools {
@@ -73,6 +77,7 @@ impl Tools {
             revision: Arc::new(RevisionState::new()),
             cfg,
             write_lock: tokio::sync::Mutex::new(()),
+            jobs: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 

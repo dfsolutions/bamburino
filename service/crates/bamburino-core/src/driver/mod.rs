@@ -12,6 +12,7 @@ pub mod tool;
 pub mod types;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 pub use http::{HttpDriverClient, HttpDriverConfig};
 pub use tool::DriverTool;
@@ -64,4 +65,14 @@ pub trait DriverClient: Send + Sync {
         plate_revision: &str,
         slice_result_id: &str,
     ) -> Result<SliceSummary, DriverError>;
+    /// Exports the G-code of the current slice result of the selected plate
+    /// to `path` (absolute, `.gcode`, existing directory, must not exist).
+    /// Returns the (already terminal) export job. Takes no undo snapshot.
+    async fn export_gcode(
+        &self,
+        plate_index: u32,
+        plate_revision: &str,
+        slice_result_id: &str,
+        path: &Path,
+    ) -> Result<DriverJob, DriverError>;
 }

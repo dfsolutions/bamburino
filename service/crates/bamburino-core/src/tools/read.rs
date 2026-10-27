@@ -118,7 +118,7 @@ impl Tools {
     /// Requires a ready Studio, then refreshes the revision. The revision is
     /// refreshed before the data is read: data read later than the revision
     /// can only make a following write conflict, never slip through.
-    async fn ready_with_revision(&self) -> Result<(AppState, u64), ToolError> {
+    pub(super) async fn ready_with_revision(&self) -> Result<(AppState, u64), ToolError> {
         self.revision.touch_client();
         let app = self
             .probe

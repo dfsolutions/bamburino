@@ -119,6 +119,15 @@ impl DriverClient for CountingDriver {
     async fn preview_summary(&self, p: u32, r: &str, s: &str) -> Result<SliceSummary, DriverError> {
         self.inner.preview_summary(p, r, s).await
     }
+    async fn export_gcode(
+        &self,
+        p: u32,
+        r: &str,
+        s: &str,
+        path: &std::path::Path,
+    ) -> Result<DriverJob, DriverError> {
+        self.inner.export_gcode(p, r, s, path).await
+    }
 }
 
 /// Maps a failure of a driver call that reads. A stale reference means the
@@ -174,7 +183,7 @@ fn advance_ok(before: &str, after: &str, n: u32) -> bool {
     }
 }
 
-fn busy_reason(app: &AppState) -> Option<&'static str> {
+pub(super) fn busy_reason(app: &AppState) -> Option<&'static str> {
     if app.modal_open {
         Some("modal_open")
     } else if app.ui_job_running {
@@ -198,7 +207,6 @@ fn snapshot_ok(before: &Option<String>, after: &Option<String>, n: u32) -> bool 
 impl Tools {
     /// Runs `apply` under the mutation pipeline (module docs) and returns its
     /// result with the revision issued right after the mutation.
-    #[allow(dead_code)] // the tools so far all need `read_back`
     pub(crate) async fn guarded_mutation<F, Fut, T>(
         &self,
         expected_revision: u64,

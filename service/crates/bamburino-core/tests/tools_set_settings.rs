@@ -587,6 +587,15 @@ impl DriverClient for Flaky {
     async fn preview_summary(&self, p: u32, r: &str, s: &str) -> Result<SliceSummary, DriverError> {
         self.inner.preview_summary(p, r, s).await
     }
+    async fn export_gcode(
+        &self,
+        p: u32,
+        r: &str,
+        s: &str,
+        path: &std::path::Path,
+    ) -> Result<DriverJob, DriverError> {
+        self.inner.export_gcode(p, r, s, path).await
+    }
 }
 
 #[tokio::test]
