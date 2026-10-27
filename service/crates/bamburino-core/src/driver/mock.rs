@@ -13,8 +13,8 @@ use std::time::Duration;
 use super::map::{OVERRIDE_KEYS, WRITABLE_KEYS};
 use super::{
     AbsoluteTransform, ActivePresets, AppState, DriverCapabilities, DriverClient, DriverError,
-    DriverJob, DriverTool, EffectiveSetting, FilamentUsage, Instance, JobStatus, ModelObject,
-    Plate, PlateList, SettingSource, SettingsTarget, SliceState, SliceSummary,
+    DriverJob, DriverJobError, DriverTool, EffectiveSetting, FilamentUsage, Instance, JobStatus,
+    ModelObject, Plate, PlateList, SettingSource, SettingsTarget, SliceState, SliceSummary,
 };
 use crate::build_info;
 use crate::catalog::{Catalog, OptionKind};
@@ -28,6 +28,13 @@ struct Snapshot {
     plate_overrides: BTreeMap<String, String>,
     object_overrides: BTreeMap<String, String>,
     instance: Instance,
+}
+
+#[derive(Default)]
+struct SummaryStats {
+    print_time_s: Option<f64>,
+    filaments: Vec<FilamentUsage>,
+    support_volume_mm3: Option<f64>,
 }
 
 struct Job {
@@ -62,6 +69,8 @@ struct State {
     job_counter: u64,
     jobs: BTreeMap<String, Job>,
     valid_result: Option<(String, u32)>,
+    summary_stats: SummaryStats,
+    estimated_time_s: Option<f64>,
 }
 
 /// Scriptable in-memory driver. All methods take `&self`.
@@ -119,6 +128,36 @@ impl State {
         self.jobs.values().any(|j| !j.job.status.is_terminal())
     }
 
+    /// An edit invalidates the current slice result and active jobs.
+    fn invalidate_slice(&mut self) {
+        self.valid_result = None;
+        for entry in self.jobs.values_mut() {
+            if !entry.job.status.is_terminal() {
+                entry.job.status = JobStatus::Stale;
+                entry.job.error = Some(DriverJobError {
+                    code: "STALE_REFERENCE".to_string(),
+                    message: "slice result invalidated by an edit".to_string(),
+                });
+            }
+        }
+    }
+
+    /// Issues a fresh plate revision for the current edit epoch.
+    fn plate_state(&mut self) -> PlateList {
+        self.revision_counter += 1;
+        let revision = format!("mock-session:{}", self.revision_counter);
+        self.issued.insert(revision.clone(), self.epoch);
+        PlateList {
+            plates: vec![Plate {
+                index: 0,
+                name: "Plate 1".to_string(),
+                locked: false,
+            }],
+            selected_index: 0,
+            plate_revision: revision,
+        }
+    }
+
     /// Records an undo snapshot of the state before a mutation and
     /// invalidates every issued plate revision.
     fn take_snapshot(&mut self) {
@@ -132,6 +171,7 @@ impl State {
         self.undo_snapshot = Some(self.snapshot_time.to_string());
         self.epoch += 1;
         self.dirty = true;
+        self.invalidate_slice();
     }
 
     fn check_revision(&self, revision: &str) -> Result<(), DriverError> {
@@ -202,6 +242,8 @@ impl MockDriver {
                 job_counter: 0,
                 jobs: BTreeMap::new(),
                 valid_result: None,
+                summary_stats: SummaryStats::default(),
+                estimated_time_s: Some(1800.0),
             }),
         }
     }
@@ -235,6 +277,27 @@ impl MockDriver {
         st.snapshot_time += 1;
         st.undo_snapshot = Some(st.snapshot_time.to_string());
         st.epoch += 1;
+        st.invalidate_slice();
+    }
+
+    /// Simulates Task 18 data: print time, filament usage and support volume
+    /// reported by `preview_summary`. Defaults to nothing, like the driver.
+    pub fn set_summary_stats(
+        &self,
+        print_time_s: Option<f64>,
+        filaments: Vec<FilamentUsage>,
+        support_volume_mm3: Option<f64>,
+    ) {
+        self.lock().summary_stats = SummaryStats {
+            print_time_s,
+            filaments,
+            support_volume_mm3,
+        };
+    }
+
+    /// Overrides `statistics.estimatedNormalTime` reported by `slice_state`.
+    pub fn set_estimated_time(&self, seconds: Option<f64>) {
+        self.lock().estimated_time_s = seconds;
     }
 
     pub fn set_modal(&self, open: bool) {
@@ -280,9 +343,9 @@ impl MockDriver {
             return Err(err);
         }
         let st = self.lock();
-        if tool.is_mutation() && st.modal_open {
+        if tool.is_mutation() && (st.modal_open || st.slicing_running()) {
             return Err(DriverError::Busy {
-                message: "a modal dialog is open".to_string(),
+                message: "a modal dialog is open or a job is running".to_string(),
             });
         }
         Ok(st)
@@ -329,33 +392,21 @@ impl DriverClient for MockDriver {
 
     async fn plate_list(&self) -> Result<PlateList, DriverError> {
         let mut st = self.enter(DriverTool::PlateList).await?;
-        st.revision_counter += 1;
-        let revision = format!("mock-session:{}", st.revision_counter);
-        let epoch = st.epoch;
-        st.issued.insert(revision.clone(), epoch);
-        Ok(PlateList {
-            plates: vec![Plate {
-                index: 0,
-                name: "Plate 1".to_string(),
-                locked: false,
-            }],
-            selected_index: 0,
-            plate_revision: revision,
-        })
+        Ok(st.plate_state())
     }
 
     async fn plate_select(
         &self,
         plate_index: u32,
         plate_revision: &str,
-    ) -> Result<(), DriverError> {
+    ) -> Result<PlateList, DriverError> {
         let mut st = self.enter(DriverTool::PlateSelect).await?;
         st.check_revision(plate_revision)?;
         State::check_plate(plate_index)?;
         // Like the driver, selecting a plate takes an undo snapshot and so
         // invalidates every previously issued plate revision.
         st.take_snapshot();
-        Ok(())
+        Ok(st.plate_state())
     }
 
     async fn model_list(&self) -> Result<Vec<ModelObject>, DriverError> {
@@ -442,7 +493,7 @@ impl DriverClient for MockDriver {
         &self,
         target: &SettingsTarget,
         values: &BTreeMap<String, String>,
-    ) -> Result<(), DriverError> {
+    ) -> Result<PlateList, DriverError> {
         let mut st = self.enter(DriverTool::SettingsOverride).await?;
         match target {
             SettingsTarget::Project => {
@@ -472,7 +523,7 @@ impl DriverClient for MockDriver {
             _ => &mut st.plate_overrides,
         };
         store.extend(values.iter().map(|(k, v)| (k.clone(), v.clone())));
-        Ok(())
+        Ok(st.plate_state())
     }
 
     async fn object_transform(
@@ -521,6 +572,7 @@ impl DriverClient for MockDriver {
             message: None,
             error: None,
             slice_result_id: None,
+            reused: false,
         };
         st.valid_result = None;
         st.jobs.insert(job.id.clone(), Job { job: job.clone() });
@@ -571,6 +623,7 @@ impl DriverClient for MockDriver {
         Ok(SliceState {
             running: st.slicing_running(),
             valid: st.valid_result.is_some(),
+            estimated_time_s: st.valid_result.as_ref().and(st.estimated_time_s),
             slice_result_id: st.valid_result.as_ref().map(|(id, _)| id.clone()),
             plate_index: st.valid_result.as_ref().map(|(_, p)| *p),
         })
@@ -586,16 +639,10 @@ impl DriverClient for MockDriver {
         st.check_revision(plate_revision)?;
         State::check_plate(plate_index)?;
         match &st.valid_result {
-            // Print time and filament usage are placeholders: the real
-            // `preview_get_summary` exposes neither (source TBD by audit).
             Some((id, _)) if id == slice_result_id => Ok(SliceSummary {
-                print_time_s: Some(1800.0),
-                filaments: vec![FilamentUsage {
-                    index: 0,
-                    grams: Some(12.5),
-                    meters: Some(4.2),
-                }],
-                support_volume_mm3: Some(0.0),
+                print_time_s: st.summary_stats.print_time_s,
+                filaments: st.summary_stats.filaments.clone(),
+                support_volume_mm3: st.summary_stats.support_volume_mm3,
                 warnings: Vec::new(),
                 raw: serde_json::json!({ "sliceResultId": slice_result_id }),
             }),

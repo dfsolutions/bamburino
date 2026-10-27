@@ -7,18 +7,18 @@
 //! | `app_state` | `app_get_state` | `{}` |
 //! | `capabilities` | `app_get_capabilities` | `{}` |
 //! | `plate_list` | `plate_list` | `{}` |
-//! | `plate_select` | `plate_select` | `{plateIndex, expectedPlateRevision}`; mutation, takes an undo snapshot (earlier plate revisions go stale) |
+//! | `plate_select` | `plate_select` | `{plateIndex, expectedPlateRevision}`; returns the new plate state; mutation, takes an undo snapshot (earlier plate revisions go stale) |
 //! | `model_list` | `model_list` | `{}` |
 //! | `active_presets` | `preset_list` x3 | `{kind: "printer"\|"process"\|"filament"}` (selected preset: field `selected`; filaments: `slots`) |
 //! | `writable_keys` | `settings_get` | `{}` -> `writableKeys` |
 //! | `settings_effective` | `settings_effective` | `{keys?, plateIndex?+expectedPlateRevision?, objectId?}` |
 //! | `settings_update` | `settings_update` | `{values}` |
-//! | `settings_override` | `settings_override` | `{scope: "plate"\|"object", values, plateIndex+expectedPlateRevision \| objectId}` |
+//! | `settings_override` | `settings_override` | `{scope: "plate"\|"object", values, plateIndex+expectedPlateRevision \| objectId}`; returns new `plates.plateRevision` |
 //! | `object_transform` | `object_transform` | `{objectId, instanceId (required), position, rotation, scale}`; returns the whole model state |
 //! | `slice_start` | `slice_start` | `{plateIndex, expectedPlateRevision}`; selected plate only |
 //! | `job_get` / `job_cancel` | `job_get` / `job_cancel` | `{jobId}` |
-//! | `slice_state` | `slice_get_state` | `{}` (`busy`, `valid`, `sliceResultId`, `plateIndex`) |
-//! | `preview_summary` | `preview_get_summary` | `{plateIndex, expectedPlateRevision, sliceResultId}`; returns move counts and warnings only. Print time, filament usage and support volume: source TBD by audit (Task 18) |
+//! | `slice_state` | `slice_get_state` | `{}` (`busy`, `valid`, `sliceResultId`, `plateIndex`, `statistics.estimatedNormalTime` -> print time) |
+//! | `preview_summary` | `preview_get_summary` | `{plateIndex, expectedPlateRevision, sliceResultId}`; returns move counts and warnings only. Print time comes from `slice_get_state`; filament usage (grams/meters) and support volume: source TBD by audit (Task 18) |
 //!
 //! `model_import` takes no undo snapshot and is not part of the trait.
 

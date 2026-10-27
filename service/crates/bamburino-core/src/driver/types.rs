@@ -125,20 +125,25 @@ pub struct AbsoluteTransform {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobStatus {
-    Queued,
     Running,
+    Cancelling,
     Succeeded,
     Failed,
     Cancelled,
-    /// Any status string the driver reports that is not mapped above
-    /// (e.g. `cancelling`, `stale`).
+    /// The result was invalidated by a later edit.
+    Stale,
+    /// Any status string the driver reports that is not mapped above.
+    /// (The driver never reports `queued`.)
     Unknown(String),
 }
 
 impl JobStatus {
     /// True for states a job never leaves.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::Stale
+        )
     }
 }
 
@@ -149,14 +154,24 @@ pub struct DriverJob {
     pub status: JobStatus,
     pub progress_percent: Option<u8>,
     pub message: Option<String>,
-    pub error: Option<String>,
+    pub error: Option<DriverJobError>,
     pub slice_result_id: Option<String>,
+    /// `result.reused`: the driver returned a still-current earlier result.
+    pub reused: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriverJobError {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct SliceState {
     pub running: bool,
     pub valid: bool,
+    /// `statistics.estimatedNormalTime` of `slice_get_state`.
+    pub estimated_time_s: Option<f64>,
     pub slice_result_id: Option<String>,
     pub plate_index: Option<u32>,
 }

@@ -68,7 +68,8 @@ impl DriverTool {
     }
 
     /// True for tools that change editor state; the driver refuses these
-    /// while a modal dialog is open or a job is running.
+    /// while a modal dialog is open or a job is running. `JobCancel` is a
+    /// read in the driver (it bypasses that gate), so it is not listed.
     pub fn is_mutation(&self) -> bool {
         matches!(
             self,
@@ -77,7 +78,6 @@ impl DriverTool {
                 | Self::SettingsOverride
                 | Self::ObjectTransform
                 | Self::SliceStart
-                | Self::JobCancel
         )
     }
 }

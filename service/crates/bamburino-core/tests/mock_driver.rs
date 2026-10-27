@@ -123,7 +123,26 @@ async fn mock_slice_job_reaches_succeeded_in_two_polls() {
 
     let rev = d.plate_list().await.unwrap().plate_revision;
     let summary = d.preview_summary(0, &rev, &result_id).await.unwrap();
-    assert!(summary.print_time_s.is_some());
+    // Like the real driver: no print time / filament data unless a test
+    // simulates Task 18 data.
+    assert_eq!(summary.print_time_s, None);
+    assert!(summary.filaments.is_empty());
+    assert_eq!(summary.support_volume_mm3, None);
+    assert_eq!(state.estimated_time_s, Some(1800.0));
+
+    d.set_summary_stats(
+        Some(60.0),
+        vec![bamburino_core::driver::FilamentUsage {
+            index: 0,
+            grams: Some(1.0),
+            meters: Some(2.0),
+        }],
+        Some(3.0),
+    );
+    let rev = d.plate_list().await.unwrap().plate_revision;
+    let summary = d.preview_summary(0, &rev, &result_id).await.unwrap();
+    assert_eq!(summary.print_time_s, Some(60.0));
+    assert_eq!(summary.filaments.len(), 1);
 }
 
 #[tokio::test]
@@ -230,6 +249,100 @@ async fn mock_plate_select_is_a_mutation_and_invalidates_revisions() {
     d.plate_select(0, &rev).await.unwrap();
     let err = d.plate_select(0, &rev).await.unwrap_err();
     assert!(matches!(err, DriverError::StaleReference { .. }), "{err:?}");
+}
+
+#[tokio::test]
+async fn mock_plate_select_and_override_return_usable_new_revision() {
+    let d = MockDriver::new();
+    let rev = d.plate_list().await.unwrap().plate_revision;
+    let list = d.plate_select(0, &rev).await.unwrap();
+    assert_ne!(list.plate_revision, rev);
+    let target = SettingsTarget::Plate {
+        index: 0,
+        plate_revision: list.plate_revision,
+    };
+    let list = d
+        .settings_override(&target, &map(&[("layer_height", "0.1")]))
+        .await
+        .unwrap();
+    // The returned revision is immediately valid for slice_start.
+    d.slice_start(0, &list.plate_revision).await.unwrap();
+}
+
+#[test]
+fn job_status_is_terminal_for_every_variant() {
+    for (status, terminal) in [
+        (JobStatus::Running, false),
+        (JobStatus::Cancelling, false),
+        (JobStatus::Succeeded, true),
+        (JobStatus::Failed, true),
+        (JobStatus::Cancelled, true),
+        (JobStatus::Stale, true),
+        (JobStatus::Unknown("x".into()), false),
+    ] {
+        assert_eq!(status.is_terminal(), terminal, "{status:?}");
+    }
+}
+
+#[tokio::test]
+async fn mock_job_cancel_is_a_read_and_works_with_modal_open() {
+    assert!(!DriverTool::JobCancel.is_mutation());
+    let d = MockDriver::new();
+    let rev = d.plate_list().await.unwrap().plate_revision;
+    let job = d.slice_start(0, &rev).await.unwrap();
+    d.set_modal(true);
+    let cancelled = d.job_cancel(&job.id).await.unwrap();
+    assert_eq!(cancelled.status, JobStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn mock_mutations_are_busy_while_a_slice_job_runs() {
+    let d = MockDriver::new();
+    let rev = d.plate_list().await.unwrap().plate_revision;
+    let job = d.slice_start(0, &rev).await.unwrap();
+    let err = d
+        .settings_update(&map(&[("layer_height", "0.2")]))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DriverError::Busy { .. }), "{err:?}");
+    d.job_get(&job.id).await.unwrap();
+    d.job_get(&job.id).await.unwrap();
+    d.settings_update(&map(&[("layer_height", "0.2")]))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn mock_edit_invalidates_slice_result_and_active_jobs() {
+    let d = MockDriver::new();
+    let rev = d.plate_list().await.unwrap().plate_revision;
+    let job = d.slice_start(0, &rev).await.unwrap();
+    d.job_get(&job.id).await.unwrap();
+    let done = d.job_get(&job.id).await.unwrap();
+    let result_id = done.slice_result_id.unwrap();
+    assert!(d.slice_state().await.unwrap().valid);
+
+    d.settings_update(&map(&[("layer_height", "0.12")]))
+        .await
+        .unwrap();
+    assert!(!d.slice_state().await.unwrap().valid);
+    let rev = d.plate_list().await.unwrap().plate_revision;
+    let err = d.preview_summary(0, &rev, &result_id).await.unwrap_err();
+    assert!(matches!(err, DriverError::StaleReference { .. }), "{err:?}");
+
+    // An edit made in the GUI while a job runs turns it Stale with a code.
+    let job = d.slice_start(0, &rev).await.unwrap();
+    d.user_edit("layer_height", "0.3");
+    let stale = d.job_get(&job.id).await.unwrap();
+    assert_eq!(stale.status, JobStatus::Stale);
+    assert_eq!(stale.error.unwrap().code, "STALE_REFERENCE");
+    assert!(!d.app_state().await.unwrap().slicing_running);
+}
+
+#[test]
+fn driver_client_is_object_safe() {
+    fn _assert(_: std::sync::Arc<dyn DriverClient>) {}
+    _assert(std::sync::Arc::new(MockDriver::new()));
 }
 
 #[tokio::test]

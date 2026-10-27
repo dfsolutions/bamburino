@@ -20,8 +20,13 @@ pub trait DriverClient: Send + Sync {
     async fn app_state(&self) -> Result<AppState, DriverError>;
     async fn capabilities(&self) -> Result<DriverCapabilities, DriverError>;
     async fn plate_list(&self) -> Result<PlateList, DriverError>;
-    async fn plate_select(&self, plate_index: u32, plate_revision: &str)
-    -> Result<(), DriverError>;
+    /// Returns the plate state with the fresh revision issued after the
+    /// selection snapshot.
+    async fn plate_select(
+        &self,
+        plate_index: u32,
+        plate_revision: &str,
+    ) -> Result<PlateList, DriverError>;
     async fn model_list(&self) -> Result<Vec<ModelObject>, DriverError>;
     async fn active_presets(&self) -> Result<ActivePresets, DriverError>;
     async fn writable_keys(&self) -> Result<BTreeSet<String>, DriverError>;
@@ -31,11 +36,12 @@ pub trait DriverClient: Send + Sync {
         keys: Option<&[String]>,
     ) -> Result<Vec<EffectiveSetting>, DriverError>;
     async fn settings_update(&self, values: &BTreeMap<String, String>) -> Result<(), DriverError>;
+    /// Returns the plate state with the fresh `plates.plateRevision`.
     async fn settings_override(
         &self,
         target: &SettingsTarget,
         values: &BTreeMap<String, String>,
-    ) -> Result<(), DriverError>;
+    ) -> Result<PlateList, DriverError>;
     async fn object_transform(
         &self,
         object_id: &str,
