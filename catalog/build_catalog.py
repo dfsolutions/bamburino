@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # bamburino build_catalog.py, adapted from subhashdasyam/bambustudio-mcp tools/build_catalog.py
 # (commit 13a138a20ec3f449471f23d5d5bab99a0d31306d), licensed AGPL-3.0-or-later.
 # This adaptation is distributed under the same licence.
@@ -24,6 +25,11 @@ GENERATOR = ("bamburino build_catalog.py, adapted from subhashdasyam/bambustudio
              "tools/build_catalog.py (AGPL-3.0-or-later)")
 
 
+# Keys registered in a loop over axes in init_machine_limits (`"machine_max_speed_" + axis.name`),
+# which the static `this->add("key", coType)` extraction cannot see.
+KNOWN_MISSING = sorted(f"machine_max_{m}_{a}" for m in ("speed", "acceleration", "jerk") for a in "xyze")
+
+
 def uncomment(text):
     return re.sub(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|//[^\n]*|/\*[\s\S]*?\*/',
                   lambda m: m[0] if m[0][0] in "\"'" else "\n" * m[0].count("\n"), text)
@@ -40,6 +46,30 @@ def numeric(text):
                              ast.BinOp, ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Load)) for n in ast.walk(tree)):
         raise ValueError(text)
     return eval(compile(tree, "<constant>", "eval"), {"__builtins__": {}}, {})
+
+
+def class_keys(header):
+    """Map each PRINT_CONFIG_CLASS_DEFINE class to the set of keys it declares (comments already stripped)."""
+    scope_keys = {}
+    # Adaptation 2: anchor at line start so the `#define PRINT_CONFIG_CLASS_DEFINE(CLASS_NAME, ...)`
+    # macro definition is skipped; the original matched it first and mis-attributed
+    # PrintObjectConfig keys (layer_height, enable_support, ...) to project scope only.
+    for match in re.finditer(r'(?m)^PRINT_CONFIG_CLASS_DEFINE\(\s*(\w+),([\s\S]*?)\n\)', header):
+        # The block ends at the first `)` in column 0; if a class ends with an indented `)` it would
+        # swallow the next class (MachineEnvelopeConfig and GCodeConfig today). Harmless for the
+        # scope rule (both are global) but must not silently swallow a PrintObject/Region class.
+        assert not (match[1] in {"PrintObjectConfig", "PrintRegionConfig"}
+                    and "PRINT_CONFIG_CLASS" in match[2]), match[1]
+        # Adaptation 2b: the type may be templated (ConfigOptionEnum<SupportType>), so not just \w+.
+        scope_keys[match[1]] = set(re.findall(r'\(\([^,()]+,\s*(\w+)\)\)', match[2]))
+    return scope_keys
+
+
+def format_default(kind, values):
+    """Numeric default; FloatOrPercent(x, true) keeps its percent flag as the string "x%"."""
+    if kind == "FloatOrPercent":
+        return f"{values[0]}%" if len(values) > 1 and values[1] else values[0]
+    return values[0]
 
 
 def generate(source, revision):
@@ -68,13 +98,7 @@ def generate(source, revision):
     options = {}
     unresolved = []
     header = uncomment((source / "src/libslic3r/PrintConfig.hpp").read_text(encoding="utf-8"))
-    scope_keys = {}
-    # Adaptation 2: anchor at line start so the `#define PRINT_CONFIG_CLASS_DEFINE(CLASS_NAME, ...)`
-    # macro definition is skipped; the original matched it first and mis-attributed
-    # PrintObjectConfig keys (layer_height, enable_support, ...) to project scope only.
-    for match in re.finditer(r'(?m)^PRINT_CONFIG_CLASS_DEFINE\(\s*(\w+),([\s\S]*?)\n\)', header):
-        # Adaptation 2b: the type may be templated (ConfigOptionEnum<SupportType>), so not just \w+.
-        scope_keys[match[1]] = set(re.findall(r'\(\([^,()]+,\s*(\w+)\)\)', match[2]))
+    scope_keys = class_keys(header)
     assert scope_keys.get("PrintObjectConfig") and scope_keys.get("PrintRegionConfig"), sorted(scope_keys)
     object_keys = scope_keys["PrintObjectConfig"]
     region_keys = scope_keys["PrintRegionConfig"]
@@ -83,6 +107,8 @@ def generate(source, revision):
         key, kind = match[1], match[2][2:]
         option = {"type": kind, "nullable": False, "scopes": ["project"],
                   "source_line": raw[:raw.index('"' + key + '"', raw.index("void PrintConfigDef::init_common_params()"))].count("\n") + 1}
+        # `extruder` is a deliberate exception: it is not declared in PrintObjectConfig/PrintRegionConfig
+        # but is assignable per object, volume and height range, so it gets the region scopes.
         # Fixed class->scope rule: PrintObjectConfig -> project+object; PrintRegionConfig ->
         # project+object+volume+height_range; any other (global) class -> project only.
         if key in object_keys or key in region_keys or key == "extruder":
@@ -156,7 +182,7 @@ def generate(source, revision):
                     vector = kind in {"Floats", "Ints", "Bools", "Percents", "FloatsOrPercents"}
                     if vector and default[1].startswith("(") and len(values) == 2:
                         values = [values[1]] * int(values[0])
-                    option["default"] = values if vector else values[0]
+                    option["default"] = values if vector else format_default(kind, values)
                 option["default_evidence"] = "source_constant"
             except (ValueError, SyntaxError, StopIteration, KeyError, IndexError):
                 option["default_expression"] = expr
@@ -177,11 +203,13 @@ def generate(source, revision):
     if missing_defaults == ["extruder"]:
         options["extruder"]["default_expression"] = "none: Studio has no static default; inherit the object's assignment"
         missing_defaults = []
-    # Adaptation 4: coverage.matrix and runtime evidence fields removed (unused).
+    # Adaptation 4: coverage.matrix and the runtime-evidence inputs were removed (unused).
+    # default_evidence, source_line, generated_from and ratio_over are still emitted.
     return {"studio_version": version, "source_revision": revision, "generator": GENERATOR,
             "source_sha256": hashlib.sha256(raw.encode()).hexdigest(), "options": dict(sorted(options.items())),
             "coverage": {"discovered": len(options), "unresolved_metadata": unresolved,
-                         "missing_defaults": missing_defaults}}
+                         "missing_defaults": missing_defaults,
+                         "known_missing": KNOWN_MISSING}}
 
 
 if __name__ == "__main__":

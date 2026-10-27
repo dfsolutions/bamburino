@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Download the pinned BambuStudio sources needed by build_catalog.py (dev/CI tool only)."""
 import tomllib
 import urllib.request

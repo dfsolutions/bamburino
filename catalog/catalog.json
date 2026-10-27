@@ -1,6 +1,20 @@
 {
   "coverage": {
     "discovered": 603,
+    "known_missing": [
+      "machine_max_acceleration_e",
+      "machine_max_acceleration_x",
+      "machine_max_acceleration_y",
+      "machine_max_acceleration_z",
+      "machine_max_jerk_e",
+      "machine_max_jerk_x",
+      "machine_max_jerk_y",
+      "machine_max_jerk_z",
+      "machine_max_speed_e",
+      "machine_max_speed_x",
+      "machine_max_speed_y",
+      "machine_max_speed_z"
+    ],
     "missing_defaults": [],
     "unresolved_metadata": []
   },
@@ -8492,7 +8506,7 @@
     "seam_slope_start_height": {
       "aliases": [],
       "category": "Quality",
-      "default": 10,
+      "default": "10%",
       "default_evidence": "source_constant",
       "description": "This amount can be specified in millimeters or as a percentage of the current layer height.",
       "enum_values": [],
@@ -9101,7 +9115,7 @@
     "sparse_infill_anchor": {
       "aliases": [],
       "category": "Strength",
-      "default": 400,
+      "default": "400%",
       "default_evidence": "source_constant",
       "description": "Connect a sparse infill line to an internal perimeter with a short segment of an additional perimeter. If expressed as percentage (example: 15%) it is calculated over sparse infill line width. Slicer tries to connect two close infill lines to a short perimeter segment. If no such perimeter segment shorter than infill_anchor_max is found, the infill line is connected to a perimeter segment at just one side and the length of the perimeter segment taken is limited to this parameter, but no longer than anchor_length_max. Set this parameter to zero to disable anchoring perimeters connected to a single infill line.",
       "enum_values": [
@@ -9358,7 +9372,7 @@
     },
     "spiral_mode_max_xy_smoothing": {
       "aliases": [],
-      "default": 200,
+      "default": "200%",
       "default_evidence": "source_constant",
       "description": "Maximum distance to move points in XY to try to achieve a smooth spiralIf expressed as a %, it will be computed over nozzle diameter",
       "enum_values": [],

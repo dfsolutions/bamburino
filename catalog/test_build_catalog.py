@@ -1,4 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for catalog/build_catalog.py. Run from the repo root after fetch_sources.py."""
+import importlib.util
 import json
 import subprocess
 import sys
@@ -7,6 +9,9 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+_spec = importlib.util.spec_from_file_location("build_catalog", ROOT / "catalog" / "build_catalog.py")
+build_catalog = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(build_catalog)
 REVISION = "f977235e6d736c4c0b650520ac5a5b72cbfe9244"
 
 
@@ -67,6 +72,50 @@ class CatalogTest(unittest.TestCase):
 
     def test_committed_catalog_is_fresh(self):
         self.assertEqual((ROOT / "catalog" / "catalog.json").read_text(encoding="utf-8"), self.generated_text)
+
+    def test_float_or_percent_defaults_keep_percent_flag(self):
+        o = self.c["options"]
+        self.assertEqual(o["sparse_infill_anchor"]["default"], "400%")
+        self.assertEqual(o["spiral_mode_max_xy_smoothing"]["default"], "200%")
+
+    def test_known_missing_is_declared_and_really_absent(self):
+        missing = self.c["coverage"]["known_missing"]
+        self.assertEqual(len(missing), 12)
+        for k in missing:
+            self.assertNotIn(k, self.c["options"], k)
+
+
+class SyntheticFragmentTest(unittest.TestCase):
+    """Pin parser behaviour without downloading sources."""
+
+    def test_format_default_float_or_percent(self):
+        f = build_catalog.format_default
+        self.assertEqual(f("FloatOrPercent", [400, True]), "400%")
+        self.assertEqual(f("FloatOrPercent", [400, False]), 400)
+        self.assertEqual(f("FloatOrPercent", [400]), 400)
+        self.assertEqual(f("Float", [1.5]), 1.5)
+
+    def test_numeric_parses_constructor_args(self):
+        self.assertEqual([build_catalog.numeric(v) for v in "200, true".split(",")], [200, True])
+
+    def test_class_keys_templated_types_and_define_skipped(self):
+        header = chr(10).join([
+            "#define PRINT_CONFIG_CLASS_DEFINE(CLASS_NAME, PARAMETER_DEFINITION_SEQ) " + chr(92),
+            "class CLASS_NAME { };",
+            "PRINT_CONFIG_CLASS_DEFINE(",
+            "    PrintObjectConfig,",
+            "    ((ConfigOptionFloat,               layer_height))",
+            "    ((ConfigOptionEnum<SupportType>,   support_type))",
+            ")",
+            "PRINT_CONFIG_CLASS_DEFINE(",
+            "    GCodeConfig,",
+            "    ((ConfigOptionBool,                gcode_comments))",
+            ")",
+            ""])
+        keys = build_catalog.class_keys(header)
+        self.assertEqual(sorted(keys), ["GCodeConfig", "PrintObjectConfig"])
+        self.assertEqual(keys["PrintObjectConfig"], {"layer_height", "support_type"})
+        self.assertEqual(keys["GCodeConfig"], {"gcode_comments"})
 
 
 if __name__ == "__main__":
