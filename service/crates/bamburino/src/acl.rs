@@ -19,7 +19,7 @@ const SYSTEM_SID: &str = "S-1-5-18";
 const ADMINS_SID: &str = "S-1-5-32-544";
 const LOCAL_SERVICE_SID: &str = "S-1-5-19";
 
-fn valid_sid(sid: &str) -> bool {
+pub(crate) fn valid_sid(sid: &str) -> bool {
     let Some(rest) = sid.strip_prefix("S-1-") else {
         return false;
     };
@@ -47,10 +47,18 @@ fn grant_args(is_dir: bool, owner_sid: &str, owner: OwnerAccess) -> Vec<String> 
     ]
 }
 
+/// Absolute path of a System32 tool, so a binary planted earlier in `PATH`
+/// is never run.
+#[cfg(windows)]
+fn system32(exe: &str) -> std::path::PathBuf {
+    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+    std::path::PathBuf::from(root).join("System32").join(exe)
+}
+
 /// SID of the user running this process (`whoami /user`).
 #[cfg(windows)]
 pub fn current_user_sid() -> io::Result<String> {
-    let out = std::process::Command::new("whoami")
+    let out = std::process::Command::new(system32("whoami.exe"))
         .args(["/user", "/fo", "csv", "/nh"])
         .output()?;
     let text = String::from_utf8_lossy(&out.stdout);
@@ -75,7 +83,7 @@ pub fn apply_acl(path: &Path, owner_sid: &str, owner_access: OwnerAccess) -> io:
             "owner_sid is not a valid SID",
         ));
     }
-    let mut cmd = std::process::Command::new("icacls");
+    let mut cmd = std::process::Command::new(system32("icacls.exe"));
     cmd.arg(path).arg("/inheritance:r");
     for a in grant_args(path.is_dir(), owner_sid, owner_access) {
         cmd.arg("/grant:r").arg(a);

@@ -176,40 +176,82 @@ impl ConfigDir {
         self.0.join("logs")
     }
 
-    /// Creates the directory layout, the default `config.toml` and the client
-    /// token if absent, and (re)applies the ACLs. Idempotent; never
-    /// overwrites an existing config or token.
+    pub fn tmp_dir(&self) -> PathBuf {
+        self.0.join("tmp")
+    }
+
+    /// Prepares the configuration directory. Needs an elevated (Administrator)
+    /// prompt the first time, because `%ProgramData%\Bamburino` is created
+    /// with a protected DACL and Administrators as owner.
+    ///
+    /// Order matters: the root is created (or verified) FIRST, so no other
+    /// local user can pre-create `config.toml`, `client.token` or a temp file
+    /// in it. If the root already exists its owner must be SYSTEM or
+    /// Administrators and its DACL protected, otherwise init refuses.
+    /// Idempotent; never overwrites an existing config or token.
+    ///
+    /// Known limitation: the location comes from the `PROGRAMDATA`
+    /// environment variable, not from the Known Folder API.
     pub fn init(&self) -> Result<(), ConfigError> {
         use crate::acl::{OwnerAccess, apply_acl, current_user_sid};
         use crate::secrets::{generate_token, read_secret, write_secret_atomic};
+        use crate::secure::{create_protected_root, create_restricted_file, root_problem};
+        use std::io::Write;
         let io = |p: &Path, e: std::io::Error| ConfigError::Io(p.to_path_buf(), e.to_string());
-        std::fs::create_dir_all(self.logs_dir()).map_err(|e| io(&self.0, e))?;
+
+        let installer = current_user_sid().map_err(|e| io(&self.0, e))?;
+        if self.0.exists() {
+            if let Some(problem) = root_problem(&self.0) {
+                return Err(ConfigError::Invalid(format!(
+                    "refusing to use {}: {problem}. Remove or fix the directory as Administrator and run `bamburino config init` again",
+                    self.0.display()
+                )));
+            }
+        } else {
+            create_protected_root(&self.0, &installer).map_err(|e| {
+                ConfigError::Io(
+                    self.0.clone(),
+                    format!("{e} (creating the configuration root needs an elevated Administrator prompt)"),
+                )
+            })?;
+        }
+
         let cfg_path = self.config_file();
         if !cfg_path.exists() {
             let cfg = Config {
-                owner_sid: current_user_sid().ok(),
+                owner_sid: Some(installer.clone()),
                 ..Config::default()
             };
-            std::fs::write(&cfg_path, cfg.to_toml()).map_err(|e| io(&cfg_path, e))?;
+            let mut f = create_restricted_file(&cfg_path, &installer, OwnerAccess::Read)
+                .map_err(|e| io(&cfg_path, e))?;
+            f.write_all(cfg.to_toml().as_bytes())
+                .map_err(|e| io(&cfg_path, e))?;
         }
         let cfg = Config::load(self)?;
-        let sid = match cfg.owner_sid {
-            Some(s) => s,
-            None => current_user_sid().map_err(|e| io(&self.0, e))?,
-        };
+        let sid = cfg.owner_sid.unwrap_or(installer);
+
         let client = self.client_token_file();
         if read_secret(&client).map_err(|e| io(&client, e))?.is_none() {
-            write_secret_atomic(&client, &generate_token()).map_err(|e| io(&client, e))?;
+            write_secret_atomic(&client, &generate_token(), &sid).map_err(|e| io(&client, e))?;
+        }
+        // Empty placeholder so `set-driver-token` can overwrite it in place
+        // without write access to the (locked) root.
+        let driver = self.driver_token_file();
+        if !driver.exists() {
+            create_restricted_file(&driver, &sid, OwnerAccess::Modify)
+                .map_err(|e| io(&driver, e))?;
+        }
+        for d in [self.logs_dir(), self.tmp_dir()] {
+            std::fs::create_dir_all(&d).map_err(|e| io(&d, e))?;
         }
         for (p, a) in [
             (cfg_path, OwnerAccess::Read),
             (client, OwnerAccess::Read),
-            (self.driver_token_file(), OwnerAccess::Modify),
+            (driver, OwnerAccess::Modify),
             (self.logs_dir(), OwnerAccess::Modify),
+            (self.tmp_dir(), OwnerAccess::Modify),
         ] {
-            if p.exists() {
-                apply_acl(&p, &sid, a).map_err(|e| io(&p, e))?;
-            }
+            apply_acl(&p, &sid, a).map_err(|e| io(&p, e))?;
         }
         Ok(())
     }

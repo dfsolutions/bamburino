@@ -2,11 +2,13 @@
 //! Token generation and secret files. A secret value is never part of an
 //! error message, `Debug` output or log line.
 
+use std::fs::File;
 use std::io::{self, BufRead, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::acl::{OwnerAccess, apply_acl, current_user_sid};
+use crate::acl::OwnerAccess;
 use crate::config::ConfigError;
+use crate::secure::create_restricted_file;
 
 const B64URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
@@ -29,29 +31,42 @@ pub fn generate_token() -> String {
     out
 }
 
-/// Writes `value` to a temp file in the same directory, protects it with the
-/// ACL before the secret lands in it, then renames it over `path`. The owner
-/// can modify only `driver.token`.
-pub fn write_secret_atomic(path: &Path, value: &str) -> io::Result<()> {
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+/// Name of the temp file used by [`write_secret_atomic`] for `path`.
+fn temp_path(path: &Path) -> io::Result<PathBuf> {
     let name = path
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))?
         .to_string_lossy()
         .into_owned();
-    let tmp = dir.join(format!(".{name}.tmp"));
-    let access = if name == "driver.token" {
+    Ok(path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(".{name}.tmp")))
+}
+
+fn access_for(path: &Path) -> OwnerAccess {
+    if path.file_name().is_some_and(|n| n == "driver.token") {
         OwnerAccess::Modify
     } else {
         OwnerAccess::Read
-    };
+    }
+}
+
+/// Creates the temp file for `path`, already restricted (protected DACL from
+/// creation, exclusive share mode) for `owner_sid`.
+pub fn create_secret_temp(path: &Path, owner_sid: &str) -> io::Result<(File, PathBuf)> {
+    let tmp = temp_path(path)?;
+    let f = create_restricted_file(&tmp, owner_sid, access_for(path))?;
+    Ok((f, tmp))
+}
+
+/// Writes `value` to a restricted temp file in the same directory, then
+/// renames it over `path`. The ACE for the installing user uses `owner_sid`
+/// (the configured owner). Needs write access to the directory (an
+/// administrator, since the configuration root is locked down).
+pub fn write_secret_atomic(path: &Path, value: &str, owner_sid: &str) -> io::Result<()> {
+    let (mut f, tmp) = create_secret_temp(path, owner_sid)?;
     let result = (|| {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp)?;
-        apply_acl(&tmp, &current_user_sid()?, access)?;
         f.write_all(value.as_bytes())?;
         f.sync_all()?;
         drop(f);
@@ -61,6 +76,18 @@ pub fn write_secret_atomic(path: &Path, value: &str) -> io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
     }
     result
+}
+
+/// Overwrites an EXISTING secret file in place (no create, so no write access
+/// to the directory is needed). Used by `config set-driver-token` as the
+/// non-elevated installing user; the file's own ACL gates the write.
+pub fn overwrite_secret(path: &Path, value: &str) -> io::Result<()> {
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)?;
+    f.write_all(value.as_bytes())?;
+    f.sync_all()
 }
 
 /// Reads a secret file: `None` when absent or empty, whitespace trimmed.

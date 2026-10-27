@@ -23,24 +23,44 @@ fn main() {
     }
 }
 
-/// `config init` / `config set-driver-token` (token on STDIN, never echoed).
+/// `config init` (elevated) / `config set-driver-token` (token on STDIN,
+/// never echoed, never an argument).
+///
+/// `set-driver-token` does NOT need elevation and does not call `init`: it
+/// overwrites the existing `driver.token` in place, which the installing
+/// user may modify. It fails loudly if `config init` was never run.
 fn run_config(sub: Option<&str>) -> i32 {
-    use bamburino::config::ConfigDir;
-    use bamburino::secrets::{read_driver_token_from_stdin, write_secret_atomic};
+    use bamburino::config::{ConfigDir, ConfigError};
+    use bamburino::console::EchoOff;
+    use bamburino::secrets::{overwrite_secret, read_driver_token_from_stdin};
 
     let dir = ConfigDir::resolve(std::env::var_os("BAMBURINO_CONFIG_DIR").map(Into::into));
     let result = match sub {
         Some("init") => dir
             .init()
             .map(|()| println!("configuration ready in {}", dir.0.display())),
-        Some("set-driver-token") => dir.init().and_then(|()| {
-            let token = read_driver_token_from_stdin(std::io::stdin().lock())?;
-            write_secret_atomic(&dir.driver_token_file(), &token).map_err(|e| {
-                bamburino::config::ConfigError::Io(dir.driver_token_file(), e.to_string())
-            })?;
+        Some("set-driver-token") => (|| {
+            let path = dir.driver_token_file();
+            if !path.exists() {
+                return Err(ConfigError::Invalid(format!(
+                    "{} not found: run `bamburino config init` from an elevated prompt first",
+                    path.display()
+                )));
+            }
+            let echo = EchoOff::disable();
+            if echo.is_some() {
+                eprint!("Driver token (64 hex characters, input hidden): ");
+            }
+            let token = read_driver_token_from_stdin(std::io::stdin().lock());
+            if echo.is_some() {
+                eprintln!();
+            }
+            drop(echo);
+            overwrite_secret(&path, &token?)
+                .map_err(|e| ConfigError::Io(path.clone(), e.to_string()))?;
             println!("driver token saved");
             Ok(())
-        }),
+        })(),
         _ => {
             eprintln!("usage: bamburino config init | config set-driver-token (token on stdin)");
             return 2;
