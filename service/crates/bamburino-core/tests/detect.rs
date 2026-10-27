@@ -189,3 +189,90 @@ async fn status_is_cached_for_a_second() {
     mock.set_unreachable(true);
     assert!(matches!(p.status().await, StudioStatus::Ready { .. }));
 }
+
+struct UnknownProcessProbe;
+impl bamburino_core::detect::ProcessProbe for UnknownProcessProbe {
+    fn studio_running(&self) -> Option<bool> {
+        None
+    }
+}
+
+#[tokio::test]
+async fn timeout_is_not_reported_as_not_running_or_off() {
+    for running in [true, false] {
+        let mock = Arc::new(MockDriver::new());
+        mock.fail_next(DriverError::Timeout { after_ms: 5000 });
+        let e = probe(&mock, running)
+            .require_ready(false, false)
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, ToolErrorCode::DriverError);
+        assert!(e.message.contains("timed out"), "{}", e.message);
+        assert!(!e.message.contains("not running") && !e.message.contains("is off"));
+    }
+}
+
+#[tokio::test]
+async fn busy_is_propagated_as_busy() {
+    let mock = Arc::new(MockDriver::new());
+    mock.fail_next(DriverError::Busy {
+        message: "modal open".into(),
+    });
+    let p = probe(&mock, false);
+    let e = p.require_ready(false, false).await.unwrap_err();
+    assert_eq!(e.code, ToolErrorCode::Busy);
+    assert_eq!(e.message, "modal open");
+
+    mock.fail_next(DriverError::Busy {
+        message: "x".into(),
+    });
+    assert!(matches!(
+        p.status().await,
+        StudioStatus::DriverFault {
+            code: ToolErrorCode::Busy,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn unreadable_process_list_is_distinct() {
+    let mock = Arc::new(MockDriver::new());
+    mock.set_unreachable(true);
+    let p = StatusProbe::new(mock.clone(), Arc::new(UnknownProcessProbe), true);
+    assert_eq!(p.status().await, StudioStatus::ProcessUnknown);
+    let e = p.require_ready(false, false).await.unwrap_err();
+    assert_eq!(e.code, ToolErrorCode::DriverError);
+    assert!(e.message.contains("could not be inspected"));
+}
+
+#[tokio::test]
+async fn no_token_never_contacts_the_driver() {
+    let mock = Arc::new(MockDriver::new());
+    let p = StatusProbe::new(mock.clone(), Arc::new(FixedProcessProbe(true)), false);
+    let _ = p.status().await;
+    let _ = p.require_ready(true, false).await;
+    assert!(mock.calls().is_empty(), "{:?}", mock.calls());
+}
+
+#[tokio::test]
+async fn session_change_refetches_capabilities() {
+    let mock = Arc::new(MockDriver::new());
+    mock.set_identity(STUDIO_VERSION, &good_patch());
+    let p = probe(&mock, true);
+    let count = |m: &MockDriver| {
+        m.calls()
+            .iter()
+            .filter(|c| c.as_str() == "app_get_capabilities")
+            .count()
+    };
+    p.require_ready(true, false).await.unwrap();
+    p.require_ready(true, false).await.unwrap();
+    assert_eq!(count(&mock), 1);
+    // Restart with an old build: new session, new identity.
+    mock.set_session("session-2");
+    mock.set_identity("02.08.02.61", &good_patch());
+    let e = p.require_ready(true, false).await.unwrap_err();
+    assert_eq!(e.code, ToolErrorCode::VersionMismatch);
+    assert_eq!(count(&mock), 2);
+}

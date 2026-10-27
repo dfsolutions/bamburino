@@ -46,6 +46,7 @@ struct State {
     // identity
     app_version: String,
     patch_id: Option<String>,
+    session_id: String,
     // injected faults
     unreachable: bool,
     modal_open: bool,
@@ -224,6 +225,7 @@ impl MockDriver {
                 calls: Vec::new(),
                 app_version: build_info::STUDIO_VERSION.to_string(),
                 patch_id: build_info::EXPECTED_PATCH_ID.map(str::to_string),
+                session_id: "mock-session".to_string(),
                 unreachable: false,
                 modal_open: false,
                 fail_next: None,
@@ -318,6 +320,11 @@ impl MockDriver {
         self.lock().unreachable = unreachable;
     }
 
+    /// Simulates a Studio restart: a new `session_id` is reported.
+    pub fn set_session(&self, session_id: &str) {
+        self.lock().session_id = session_id.to_string();
+    }
+
     /// Overrides the reported identity (for version/patch mismatch tests).
     pub fn set_identity(&self, app_version: &str, patch_id: &str) {
         let mut st = self.lock();
@@ -357,7 +364,7 @@ impl DriverClient for MockDriver {
     async fn app_state(&self) -> Result<AppState, DriverError> {
         let st = self.enter(DriverTool::AppGetState).await?;
         Ok(AppState {
-            session_id: "mock-session".to_string(),
+            session_id: st.session_id.clone(),
             app_version: st.app_version.clone(),
             project_name: "Untitled".to_string(),
             project_path: String::new(),
@@ -376,7 +383,7 @@ impl DriverClient for MockDriver {
     async fn capabilities(&self) -> Result<DriverCapabilities, DriverError> {
         let st = self.enter(DriverTool::AppGetCapabilities).await?;
         let raw = serde_json::json!({
-            "sessionId": "mock-session",
+            "sessionId": st.session_id,
             "protocolVersion": 1,
             "appVersion": st.app_version,
             "buildSuffix": "bamburino",

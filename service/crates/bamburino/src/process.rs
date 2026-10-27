@@ -28,14 +28,14 @@ mod imp {
     }
 
     impl ProcessProbe for WindowsProcessProbe {
-        fn studio_running(&self) -> bool {
+        fn studio_running(&self) -> Option<bool> {
             // SAFETY: plain Win32 snapshot enumeration; `entry` is a properly
             // sized, zero-initialised PROCESSENTRY32W and the handle is closed
             // on every path.
             unsafe {
                 let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
                 if snap == INVALID_HANDLE_VALUE {
-                    return false;
+                    return None;
                 }
                 let mut entry: PROCESSENTRY32W = std::mem::zeroed();
                 entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
@@ -49,7 +49,7 @@ mod imp {
                     ok = Process32NextW(snap, &mut entry) != 0;
                 }
                 CloseHandle(snap);
-                found
+                Some(found)
             }
         }
     }

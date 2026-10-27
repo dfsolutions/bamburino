@@ -21,7 +21,8 @@ const SET_TOKEN_HINT: &str = "Run: bamburino.exe config set-driver-token";
 
 /// Tells whether a Bambu Studio process exists.
 pub trait ProcessProbe: Send + Sync {
-    fn studio_running(&self) -> bool;
+    /// `None` when the process list could not be inspected.
+    fn studio_running(&self) -> Option<bool>;
 }
 
 /// Fixed answer, for tests.
@@ -30,8 +31,8 @@ pub struct FixedProcessProbe(pub bool);
 
 #[cfg(feature = "mock")]
 impl ProcessProbe for FixedProcessProbe {
-    fn studio_running(&self) -> bool {
-        self.0
+    fn studio_running(&self) -> Option<bool> {
+        Some(self.0)
     }
 }
 
@@ -102,6 +103,14 @@ pub enum StudioStatus {
     DriverOff,
     Unauthorized,
     TokenMissing,
+    /// The driver is unreachable and the process list could not be inspected.
+    ProcessUnknown,
+    /// The driver answered (or was reached) but the call failed: it is
+    /// running, so this is neither `NotRunning` nor `DriverOff`.
+    DriverFault {
+        code: ToolErrorCode,
+        message: String,
+    },
     Ready {
         app_version: String,
         identity: BuildIdentity,
@@ -194,10 +203,20 @@ impl StatusProbe {
                 ToolErrorCode::DriverUnauthorized,
                 SET_TOKEN_HINT,
             )),
-            Probe::Other(_) => Err(ToolError::new(
+            Probe::Other(StudioStatus::TokenMissing) => Err(ToolError::new(
                 ToolErrorCode::DriverTokenMissing,
                 SET_TOKEN_HINT,
             )),
+            Probe::Other(StudioStatus::ProcessUnknown) => Err(ToolError::new(
+                ToolErrorCode::DriverError,
+                "The driver is unreachable and the process list could not be inspected, so the state of Bambu Studio is unknown.",
+            )),
+            Probe::Other(StudioStatus::DriverFault { code, message }) => {
+                Err(ToolError::new(code, message))
+            }
+            Probe::Other(StudioStatus::Ready { .. }) => {
+                unreachable!("Probe::Other never carries Ready")
+            }
             Probe::Ready {
                 state,
                 identity,
@@ -259,14 +278,25 @@ impl StatusProbe {
         }
     }
 
-    /// Maps a failed driver call. Everything except an explicit rejection of
-    /// the credentials means "no usable driver": whether Studio is running at
-    /// all decides between `NotRunning` and `DriverOff`.
+    /// Maps a failed driver call. Only `Unreachable` means nobody listens, and
+    /// then the process list decides between `NotRunning` and `DriverOff`.
+    /// Every other error means the driver was reached and is reported as such.
     fn classify(&self, err: DriverError) -> StudioStatus {
         match err {
             DriverError::Unauthorized => StudioStatus::Unauthorized,
-            _ if self.process.studio_running() => StudioStatus::DriverOff,
-            _ => StudioStatus::NotRunning,
+            DriverError::Unreachable => match self.process.studio_running() {
+                Some(true) => StudioStatus::DriverOff,
+                Some(false) => StudioStatus::NotRunning,
+                None => StudioStatus::ProcessUnknown,
+            },
+            DriverError::Busy { message } => StudioStatus::DriverFault {
+                code: ToolErrorCode::Busy,
+                message,
+            },
+            other => StudioStatus::DriverFault {
+                code: ToolErrorCode::DriverError,
+                message: other.to_string(),
+            },
         }
     }
 }
