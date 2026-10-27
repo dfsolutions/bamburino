@@ -79,4 +79,53 @@ function Set-RepoActionsPolicy {
     }
 }
 
-Export-ModuleMember -Function Get-RunnerSha256, New-RunnerConfigArgs, Set-RepoActionsPolicy, Invoke-GhApi
+function Stop-Runner {
+    # Stop the on-demand runner and wait until GitHub reports it offline. Returns $true only then.
+    # All side effects are injectable so unit tests need no processes and no network.
+    param(
+        [string]$PidFile = 'D:\bb\runner\.bamburino-runner.pid',
+        [string]$Name = 'federico-pc',
+        [int]$GracefulSec = 20,
+        [int]$OfflineSec = 90,
+        [scriptblock]$GetProcs = { @(Get-Process -Name 'Runner.Listener', 'Runner.Worker' -ErrorAction SilentlyContinue) },
+        [scriptblock]$Graceful = { param($ProcId) & taskkill.exe /PID $ProcId /T 2>&1 | Out-Null },
+        [scriptblock]$Force = { param($Procs) $Procs | Stop-Process -Force -ErrorAction SilentlyContinue },
+        [scriptblock]$GetStatus = {
+            param($RunnerName)
+            $r = Invoke-GhApi 'GET' 'repos/dfsolutions/bamburino/actions/runners' $null
+            if (-not $r.Ok) { return 'unknown' }
+            $m = @($r.Json.runners | Where-Object name -eq $RunnerName)
+            if ($m.Count) { $m[0].status } else { 'absent' }
+        },
+        [scriptblock]$Sleep = { param($Sec) Start-Sleep -Seconds $Sec },
+        [scriptblock]$Log = { param($Msg) Write-Host $Msg }
+    )
+    $launcher = $null
+    if (Test-Path -LiteralPath $PidFile) {
+        $t = (Get-Content -LiteralPath $PidFile -Raw).Trim()
+        if ($t -match '^\d+$') { $launcher = [int]$t }
+    }
+    if ($launcher) { & $Graceful $launcher }
+    $waited = 0
+    while (@(& $GetProcs).Count -and $waited -lt $GracefulSec) { & $Sleep 1; $waited++ }
+    $left = @(& $GetProcs)
+    if ($left.Count) {
+        & $Log "Graceful stop timed out after $GracefulSec s: forcing $($left.Count) process(es)."
+        & $Force $left
+        $waited = 0
+        while (@(& $GetProcs).Count -and $waited -lt 10) { & $Sleep 1; $waited++ }
+        if (@(& $GetProcs).Count) { & $Log 'Runner processes are still alive.'; return $false }
+    }
+    if (Test-Path -LiteralPath $PidFile) { Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue }
+    $waited = 0
+    do {
+        $st = & $GetStatus $Name
+        if ($st -in 'offline', 'absent') { & $Log "Runner '$Name' is $st on GitHub."; return $true }
+        if ($waited -ge $OfflineSec) { break }
+        & $Sleep 5; $waited += 5
+    } while ($true)
+    & $Log "Runner '$Name' still '$st' on GitHub after $OfflineSec s."
+    return $false
+}
+
+Export-ModuleMember -Function Get-RunnerSha256, New-RunnerConfigArgs, Set-RepoActionsPolicy, Invoke-GhApi, Stop-Runner

@@ -36,13 +36,18 @@ if (-not (Test-Path (Join-Path $RunnerDir 'config.cmd'))) {
 $token = gh api -X POST "repos/$Repo/actions/runners/registration-token" --jq .token
 if ($LASTEXITCODE -ne 0 -or -not $token) { throw 'registration-token request failed (needs repo scope and admin on the repository)' }
 $cfgArgs = New-RunnerConfigArgs -Url "https://github.com/$Repo" -Token $token -Name $Name -Labels $Labels -Work $WorkDir
+$out = ''; $code = -1
 Push-Location $RunnerDir
 try {
     $out = & .\config.cmd @cfgArgs 2>&1 | Out-String
     $code = $LASTEXITCODE
+} catch {
+    # The raw exception text may contain the command line (and so the token): never propagate it.
+    $out = ''; $code = if ($LASTEXITCODE) { $LASTEXITCODE } else { -1 }
 } finally { Pop-Location }
-Write-Host ($out -replace [regex]::Escape($token), '***')
+$masked = $out -replace [regex]::Escape($token), '***'
 $token = $null; $cfgArgs = $null
-if ($code -ne 0) { throw "config.cmd failed with exit code $code" }
+Write-Host $masked
+if ($code -ne 0) { throw "config.cmd failed with exit $code (output above is masked)" }
 
 & "$PSScriptRoot/secure-repo.ps1" -Repo $Repo

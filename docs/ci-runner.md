@@ -28,12 +28,38 @@ pwsh ci/runner/register.ps1     # one time: download, verify SHA-256, register, 
 pwsh ci/runner/start.ps1        # open the runner in its own window; "Listening for Jobs" = ready
 ```
 
-Stop it by closing that window (or Ctrl+C). To remove it for good:
+### Stop
+
+```powershell
+pwsh ci/runner/stop.ps1
+```
+
+`start.ps1` records the launched process id in `D:\bb\runner\.bamburino-runner.pid`. `stop.ps1`
+asks that process tree to exit, waits up to 20 s, then force-stops any remaining `Runner.Listener` /
+`Runner.Worker`, waits until none is left, and finally polls
+`gh api repos/dfsolutions/bamburino/actions/runners` (up to about 90 s) until `federico-pc` is
+`offline`. It exits 0 only when both conditions hold, non-zero otherwise.
+
+Closing the window with the X, or killing the processes by hand, leaves the runner shown as
+`online` on GitHub for about a minute; a job queued in that window is assigned to a runner that is
+gone and stalls. Use `stop.ps1` and trust its exit code.
+
+### Remove
+
+To remove it for good:
 
 ```powershell
 $t = gh api -X POST repos/dfsolutions/bamburino/actions/runners/remove-token --jq .token
 D:\bb\runner\config.cmd remove --token $t
 ```
+
+Notes on `register.ps1`:
+
+- Do **not** run it under `Start-Transcript` (or any other logging of the console/command line): the
+  one-time registration token is on the `config.cmd` command line. If `config.cmd` fails, the script
+  reports only `config.cmd failed with exit <code>` and the output with the token masked.
+- If `D:\bb\runner\config.cmd` already exists, the download and SHA-256 check are skipped (only the
+  registration is redone, `--replace`). Delete the directory to force a fresh download.
 
 `register.ps1` takes the GitHub token from Git Credential Manager (`tools/GitHub.psm1`,
 `Set-GhToken`), checks the package SHA-256 against the value published in the release notes, and
@@ -69,5 +95,5 @@ unticked. Re-run `pwsh ci/runner/secure-repo.ps1` to verify; it exits non-zero i
 
 ## Tests
 
-`pwsh ci/runner/tests/run.ps1` runs the unit tests (SHA-256 parsing, config arguments without
+`pwsh ci/runner/tests/run.ps1` runs the unit tests (SHA-256 parsing, stop logic with fake processes and API, config arguments without
 `--runasservice`, idempotent policy application against a fake API). They use no network.
