@@ -13,7 +13,16 @@
                  --index so new files are tracked and 'git diff <tag_commit>' sees the whole patch set).
                  If a --check fails, exits 20 and writes the failing file and its rejected hunks
                  (git apply --reject on a temporary copy of the touched files) to the step log.
-                 Idempotent: every run starts again from the reset tree.
+                 Idempotent: every run starts again from the reset tree. Before the reset, the clone's
+                 'git status --porcelain' is written to the step log, so discarded local edits stay visible.
+                 Also prints the build identity CMake definitions (Get-IdentityCMakeDefines) for that patch_id.
+    Step order: -Step fetch is only for an absent or clean clone (a patched clone is dirty, so fetch exits 20
+    on it by design). -Step patch does its own reset and never needs fetch again. The deps and app steps never
+    call fetch; an 'all' step runs fetch only when the clone is missing.
+    Build identity: the app step must pass Get-IdentityCMakeDefines to CMake (-DBAMBURINO_PATCH_ID=<patch_id>
+    -DBAMBURINO_BUILD_SUFFIX=<build_suffix_prefix>.<patch_id>) and write its CMake command line to the step log.
+    Patch 0100-build-identity.diff turns them into compile definitions read by app.get_capabilities
+    (buildSuffix, patchId) and the About dialog; SLIC3R_VERSION and version.inc are not changed.
     Exit codes: 0 ok; 20 clone dirty (fetch) or patch does not apply (patch);
                 21 clone at an unexpected state (fetch, patch) or patch_id mismatch (patch); 1 any other error.
 #>
@@ -70,6 +79,15 @@ function Invoke-Fetch {
     $head = (Invoke-Git -C $src rev-parse HEAD | Select-Object -First 1).Trim()
     if ($head -ne $want) { throw "cloned $tag but HEAD is $head, expected $want (tag moved?). Delete $src before rerunning." }
     Write-Host "OK fetch: $src at $want"
+}
+
+function Get-IdentityCMakeDefines {
+    # CMake definitions carrying the build identity (contract with plan B DriverCapabilities: buildSuffix, patchId).
+    param([Parameter(Mandatory)][hashtable]$Upstream)
+    $id = $Upstream['driver.patch_id']; $prefix = $Upstream['driver.build_suffix_prefix']
+    if ($id -notmatch '^[0-9a-f]{12}$') { throw "upstream.toml: driver.patch_id is not 12 hex: '$id'" }
+    if ($prefix -notmatch '^[a-z][a-z0-9-]*$') { throw "upstream.toml: driver.build_suffix_prefix invalid: '$prefix'" }
+    return @("-DBAMBURINO_PATCH_ID=$id", "-DBAMBURINO_BUILD_SUFFIX=$prefix.$id")
 }
 
 function Get-PatchFiles {
@@ -142,7 +160,10 @@ function Invoke-Patch {
     if ($LASTEXITCODE -ne 0) { Write-Host "ERROR $src does not contain commit $want. Delete it and rerun -Step fetch."; exit 21 }
 
     $log = Write-StepLog -Step 'patch'
-    Write-Host "Resetting $src to $want; log: $log"
+    $before = & git -C $src status --porcelain --untracked-files=normal 2>&1
+    Add-Log $log "== git status --porcelain before reset (these changes are discarded)"
+    Add-Log $log $before
+    Write-Host "Resetting $src to $want ($(@($before).Count) status line(s) discarded); log: $log"
     Invoke-Git -C $src checkout --quiet --force --detach $want | Out-Null
     Invoke-Git -C $src clean --quiet -fdx --exclude=/deps/build --exclude=/build | Out-Null
     $left = Invoke-Git -C $src status --porcelain --untracked-files=all
@@ -170,7 +191,9 @@ function Invoke-Patch {
         if ($code -ne 0) { throw "git apply $name failed after a passing --check (exit $code), see $log" }
         Write-Host "applied $name"
     }
-    Write-Host "OK patch: $($patches.Count) patch(es) applied on $want (patch_id $actual)"
+    $identity = Get-IdentityCMakeDefines -Upstream $u
+    Add-Log $log "== build identity for -Step app: $($identity -join ' ')"
+    Write-Host "OK patch: $($patches.Count) patch(es) applied on $want (patch_id $actual); identity: $($identity -join ' ')"
 }
 
 switch ($Step) {

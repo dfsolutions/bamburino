@@ -1,0 +1,60 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index f1c5bc1..a76d297 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -410,6 +410,13 @@ add_definitions(-DwxUSE_UNICODE -D_UNICODE -DUNICODE -DWXINTL_NO_GETTEXT_MACRO)
+ # Disable unsafe implicit wxString to const char* / std::string and vice versa. This implicit conversion breaks the UTF-8 encoding quite often.
+ add_definitions(-DwxNO_UNSAFE_WXSTRING_CONV)
+ 
++# Bamburino build identity: exposed by app.get_capabilities (buildSuffix, patchId) and shown in About.
++# Passed by driver/build.ps1 -Step app; SLIC3R_VERSION and version.inc are left unchanged.
++set(BAMBURINO_PATCH_ID "unknown" CACHE STRING "Bamburino driver patch_id (12 hex)")
++set(BAMBURINO_BUILD_SUFFIX "unknown" CACHE STRING "Bamburino build suffix (bamburino.<patch_id>)")
++add_compile_definitions(BAMBURINO_PATCH_ID="${BAMBURINO_PATCH_ID}")
++add_compile_definitions(BAMBURINO_BUILD_SUFFIX="${BAMBURINO_BUILD_SUFFIX}")
++
+ if (SLIC3R_PROFILE)
+     message("BambuStudio will be built with a Shiny invasive profiler")
+     add_definitions(-DSLIC3R_PROFILE)
+diff --git a/src/slic3r/GUI/AboutDialog.cpp b/src/slic3r/GUI/AboutDialog.cpp
+index 41f95d1..c879a3c 100644
+--- a/src/slic3r/GUI/AboutDialog.cpp
++++ b/src/slic3r/GUI/AboutDialog.cpp
+@@ -288,6 +288,10 @@ AboutDialog::AboutDialog()
+ #else
+         auto version_string = _L("Version") + " " + std::string(version_text);
+ #endif
++#ifndef BAMBURINO_BUILD_SUFFIX
++#define BAMBURINO_BUILD_SUFFIX "unknown"
++#endif
++        version_string += wxString::FromUTF8(" (" BAMBURINO_BUILD_SUFFIX ")");
+         wxStaticText* version = new wxStaticText(this, wxID_ANY, version_string.c_str(), wxDefaultPosition, wxDefaultSize);
+         wxFont version_font = GetFont();
+         #ifdef __WXMSW__
+diff --git a/src/slic3r/GUI/McpTools.cpp b/src/slic3r/GUI/McpTools.cpp
+index ffa253e..7fcfacf 100644
+--- a/src/slic3r/GUI/McpTools.cpp
++++ b/src/slic3r/GUI/McpTools.cpp
+@@ -22,6 +22,13 @@
+ #include "libslic3r/Format/bbs_3mf.hpp"
+ #include "nlohmann/json.hpp"
+ #include <wx/dialog.h>
++// Bamburino build identity, set by CMake (-DBAMBURINO_PATCH_ID / -DBAMBURINO_BUILD_SUFFIX).
++#ifndef BAMBURINO_PATCH_ID
++#define BAMBURINO_PATCH_ID "unknown"
++#endif
++#ifndef BAMBURINO_BUILD_SUFFIX
++#define BAMBURINO_BUILD_SUFFIX "unknown"
++#endif
+ #include <wx/image.h>
+ #include <boost/filesystem.hpp>
+ #include <boost/algorithm/string/predicate.hpp>
+@@ -1467,7 +1474,7 @@ Json execute(Plater& plater, const std::string& method, const Json& params) {
+     if (method == "app.get_capabilities") {
+         Json names = Json::array({"app.get_capabilities"});
+         for (const auto& item : handlers()) names.push_back(item.first);
+-        return {{"sessionId", session_id()}, {"protocolVersion", 1}, {"appVersion", SLIC3R_VERSION}, {"methods", names},
++        return {{"sessionId", session_id()}, {"protocolVersion", 1}, {"appVersion", SLIC3R_VERSION}, {"buildSuffix", BAMBURINO_BUILD_SUFFIX}, {"patchId", BAMBURINO_PATCH_ID}, {"methods", names},
+             {"features", {{"jobCompletionTracking", true}, {"jobTrackingScope", "FFF plate slicing, sequential plate queue, UI jobs and external device jobs"}, {"parameterIndices", "zero-based"}, {"objectReferences", "stable IDs"}, {"plateReferences", "index with required expectedPlateRevision"}, {"securityPolicyVersion", 1}, {"deviceActionsEnabled", device_actions_enabled()}, {"accountReadsEnabled", account_reads_enabled()}}}};
+     }
+     const auto it = handlers().find(method);

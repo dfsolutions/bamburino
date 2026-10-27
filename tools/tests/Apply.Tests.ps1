@@ -15,11 +15,16 @@ function Invoke-PatchStep {
 function Get-Porcelain { return ((& git -C $clone status --porcelain --untracked-files=all) -join "`n") }
 
 $patchCount = @(Get-ChildItem "$PSScriptRoot/../../driver/patches" -Filter '*.diff' -File).Count
-$expectedFiles = 0
+# Distinct paths across all patches: a later patch may touch a file that an earlier one already touched.
+$touched = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
 foreach ($d in Get-ChildItem "$PSScriptRoot/../../driver/patches" -Filter '*.diff' -File) {
-    $expectedFiles += @(Select-String -LiteralPath $d.FullName -Pattern '^diff --git ').Count
+    foreach ($m in (Select-String -LiteralPath $d.FullName -Pattern '^diff --git a/(\S+) b/').Matches) { [void]$touched.Add($m.Groups[1].Value) }
 }
+$expectedFiles = $touched.Count
 if ($patchCount -eq 1 -and $expectedFiles -ne 41) { throw "patch 0001 alone should touch 41 files, counted $expectedFiles" }
+if ((Test-Path "$PSScriptRoot/../../driver/patches/0100-build-identity.diff") -and $patchCount -eq 2 -and $expectedFiles -ne 43) {
+    throw "patches 0001 + 0100 should touch 43 distinct files (41 + CMakeLists.txt + AboutDialog.cpp), counted $expectedFiles"
+}
 
 # Two consecutive runs: both succeed and leave the same tree.
 $r1 = Invoke-PatchStep
