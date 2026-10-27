@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Test fixture for ci/check-workflows.ps1 - runs-on mapping with labels (rule a)
+on: pull_request
+jobs:
+  build:
+    runs-on:
+      labels: [self-hosted]
+    steps:
+      - run: echo

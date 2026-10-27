@@ -25,10 +25,12 @@ $guard = @"
     steps:
       - uses: actions/checkout@$SHA # v7.0.1
         with: { sparse-checkout: ci/maintainers.txt }
-      - run: grep -qx "`${{ github.actor }}" ci/maintainers.txt || { echo "::error::actor not allowed"; exit 1; }
+      - run: grep -qxF "`${{ github.actor }}" ci/maintainers.txt || { echo "::error::actor not allowed on self-hosted runner"; exit 1; }
 "@
 # Check one synthetic workflow written to a temp dir; returns the result object.
-function Test-Case([string]$name, [string]$yaml) {
+function Test-Case([string]$name, [string]$yaml, [switch]$AsIs) {
+    # Unless -AsIs, add the mandatory top-level permissions block so each case isolates one rule.
+    if (-not $AsIs -and $yaml -notmatch '(?m)^permissions:') { $yaml = $yaml -replace '(?m)^jobs:', "permissions:`n  contents: read`njobs:" }
     $d = New-TempDir
     try { Set-Content -LiteralPath (Join-Path $d $name) -Value $yaml -Encoding utf8; Invoke-Check $d }
     finally { Remove-Item -Recurse -Force $d }
@@ -45,6 +47,19 @@ Assert-True ($r.Out -match 'bad-pr-trigger\.yml.*\[a\]') 'bad-pr-trigger.yml rep
 Assert-True ($r.Out -match 'bad-no-guard\.yml.*\[c\]') 'bad-no-guard.yml reported with rule c'
 Assert-True ($r.Out -match 'bad-selfhosted-write\.yml.*\[d\]') 'bad-selfhosted-write.yml reported with rule d'
 Assert-True ($r.Out -notmatch 'good-self-hosted\.yml') 'good-self-hosted.yml not reported'
+# fail-closed fixtures: file -> rule letter that must be reported
+$expect = [ordered]@{
+    'bad-quoted-write.yml' = 'd'; 'bad-inline-perm.yml' = 'g'; 'bad-if-always.yml' = 'c'
+    'bad-quoted-trigger.yml' = 'a'; 'bad-quoted-jobs.yml' = 'g'; 'bad-quoted-jobid.yml' = 'a'
+    'bad-labels.yml' = 'a'; 'bad-matrix.yml' = 'a'; 'bad-default-labels.yml' = 'a'
+    'bad-fake-guard.yml' = 'c'; 'bad-quoted-writeall.yml' = 'd'; 'bad-no-permissions.yml' = 'g'
+    'bad-workflow-run.yml' = 'a'; 'bad-guard-continue-on-error.yml' = 'c'; 'bad-guard-no-F.yml' = 'c'
+    'bad-flow-uses.yml' = 'g'
+}
+foreach ($k in $expect.Keys) {
+    $rule = $expect[$k]
+    Assert-True ($r.Out -match ([regex]::Escape($k) + ".*\[$rule\]")) "$k reported with rule $rule"
+}
 
 Write-Host 'clean and empty'
 $d = New-TempDir
@@ -95,6 +110,26 @@ $r = Test-Case 'd1.yml' ("on:`n  push:`n    branches: [main]`npermissions: write
 Assert-True ($r.Code -eq 1 -and $r.Out -match '\[d\]') 'write-all in self-hosted workflow -> d'
 $r = Test-Case 'd2.yml' ("on:`n  push:`n    branches: [main]`npermissions:`n  packages: write`n$sh")
 Assert-True ($r.Code -eq 1 -and $r.Out -match '\[d\]') 'workflow-level packages: write in self-hosted workflow -> d'
+
+Write-Host 'rule g (permissions, forms)'
+$r = Test-Case 'p1.yml' "on: workflow_dispatch`njobs:`n  x:`n    runs-on: ubuntu-latest`n    steps:`n      - run: echo`n" -AsIs
+Assert-True ($r.Code -eq 1 -and $r.Out -match '\[g\].*permissions') 'hosted workflow without permissions -> g'
+$r = Test-Case 'p2.yml' "on: workflow_dispatch`npermissions: read-all`njobs:`n  x:`n    runs-on: ubuntu-latest`n    steps:`n      - run: echo`n" -AsIs
+Assert-True ($r.Code -eq 1 -and $r.Out -match '\[g\]') 'scalar top-level permissions -> g'
+$r = Test-Case 'p3.yml' "on: workflow_dispatch`njobs: {}`n"
+Assert-True ($r.Code -eq 1 -and $r.Out -match '\[g\].*jobs') 'inline jobs -> g'
+$r = Test-Case 'p4.yml' "on: {push: {branches: [main]}}`njobs:`n  x:`n    runs-on: ubuntu-latest`n    steps:`n      - run: echo`n"
+Assert-True ($r.Code -eq 1 -and $r.Out -match '\[a\].*inline') 'inline on mapping -> a'
+$r = Test-Case 'p5.yml' "on: workflow_dispatch`njobs:`n  x: { runs-on: self-hosted }`n"
+Assert-True ($r.Code -eq 1 -and $r.Out -match '\[g\].*job form') 'inline job mapping -> g'
+$r = Test-Case 'p6.yml' "on: workflow_dispatch`njobs:`n  x:`n    runs-on: ubuntu-latest`n    steps:`n      - run: echo '#not a comment' # real comment`n      - { uses: someone/action@v1 }`n"
+Assert-True ($r.Code -eq 1 -and $r.Out -match 'someone/action@v1') 'flow-style uses checked, # in quotes kept'
+$r = Test-Case 'p7.yml' ("on:`n  push:`n    branches: [main]`njobs:`n$guard`n  build:`n    needs: guard`n    if: `${{ failure() }}`n    runs-on: self-hosted`n    steps:`n      - run: echo hi`n")
+Assert-True ($r.Code -eq 1 -and $r.Out -match '\[c\].*failure') 'if: failure() on self-hosted job -> c'
+$r = Test-Case 'p8.yml' ("on:`n  push:`n    branches: [main]`njobs:`n$guard`n  build:`n    needs: guard`n    runs-on: self-hosted`n    steps:`n      - if: cancelled()`n        run: echo hi`n")
+Assert-True ($r.Code -eq 1 -and $r.Out -match '\[c\].*cancelled') 'step-level if: cancelled() on self-hosted job -> c'
+$r = Test-Case 'p9.yml' ("on: workflow_dispatch`njobs:`n  x:`n    runs-on: `"ubuntu-latest`"`n    steps:`n      - run: echo`n")
+Assert-True ($r.Code -eq 1 -and $r.Out -match '\[a\]|\[c\]') 'quoted runs-on is not hosted -> subject to self-hosted rules'
 
 Write-Host 'global rules'
 $r = Test-Case 'g1.yml' "on:`n  pull_request_target:`njobs:`n  x:`n    runs-on: ubuntu-latest`n    steps:`n      - run: echo`n"

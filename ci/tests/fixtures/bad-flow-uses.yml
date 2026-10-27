@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Test fixture for ci/check-workflows.ps1 - flow-style uses not pinned (rule g)
+name: good-self-hosted
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # v7.0.1
+        with: { sparse-checkout: ci/maintainers.txt }
+      - run: grep -qxF "${{ github.actor }}" ci/maintainers.txt || { echo "::error::actor not allowed on self-hosted runner"; exit 1; }
+  build:
+    needs: [guard]
+    runs-on: [self-hosted, windows]
+    steps:
+      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # v7.0.1
+      - { uses: someone/action@v1 }

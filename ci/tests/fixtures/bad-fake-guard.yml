@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Test fixture for ci/check-workflows.ps1 - guard that only echoes (rule c)
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - run: echo "github.actor maintainers.txt exit 1"
+  build:
+    needs: guard
+    runs-on: [self-hosted, windows]
+    steps:
+      - run: echo

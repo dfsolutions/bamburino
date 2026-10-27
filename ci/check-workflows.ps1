@@ -1,36 +1,71 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Static guard for workflows that run on the self-hosted runner.
-# Pure PowerShell, line/regex based (no YAML module): it covers the workflow
-# style used in this repo (block mappings, inline or block lists), not all YAML.
+# Static guard for workflows that may run on the self-hosted runner.
+# Pure PowerShell, line/regex based (no YAML module). FAIL-CLOSED: anything this
+# checker cannot positively verify (flow mappings, expressions, unknown forms) is a violation.
 #
-# Rules (rule letter is printed with every violation):
-#   a  self-hosted workflow: `on:` has only push and/or workflow_dispatch
-#   b  self-hosted workflow: push has branches [main] and/or tags ['v*'] (nothing else)
-#   c  self-hosted workflow: a `guard` job on ubuntu-latest/windows-latest checks
-#      github.actor against ci/maintainers.txt; every self-hosted job has needs: guard
-#   d  self-hosted workflow: no `write` permission anywhere (incl. write-all)
-#   g  all workflows: no pull_request_target; every non-local `uses:` pinned to a
-#      40-hex SHA; `contents: write` only in job `release` of release.yml, which
-#      must run on ubuntu-latest/windows-latest
+# A job is HOSTED only if its runs-on is exactly one unquoted scalar:
+# ubuntu-latest or windows-latest. Everything else (lists, mappings, ${{ }},
+# default labels such as [Windows, X64], missing runs-on) is treated as self-hosted.
+#
+# Rules (the rule letter is printed with every violation):
+#   a  workflow with a non-hosted job: `on:` has only push and/or workflow_dispatch
+#      (an inline `on: {...}` mapping is always a violation)
+#   b  same workflows: push has branches [main] and/or tags ['v*'], nothing else
+#   c  same workflows: job `guard` on `runs-on: ubuntu-latest` (pwsh on Windows would
+#      not run the `{ ...; }` block) containing exactly this step line
+#        - run: grep -qxF "${{ github.actor }}" ci/maintainers.txt || { echo "::error::actor not allowed on self-hosted runner"; exit 1; }
+#      with no `if:`, `continue-on-error` or `shell:` inside guard; every non-hosted job
+#      has `needs: guard` and no `if:` using always()/failure()/cancelled()
+#   d  same workflows: no `write` permission at all (incl. write-all)
+#   g  all workflows: no pull_request_target; top-level `permissions:` block with
+#      `contents: read`; no inline `permissions: {...}`; a recognizable `jobs:` section;
+#      every non-local `uses:` (also flow style) pinned to a 40-hex SHA; any `write`
+#      permission only as `contents: write` in job `release` of release.yml (hosted)
+#
+# Limits that cannot be solved statically:
+#   - an "imposter commit" SHA (a SHA that exists only in a fork) passes the pin check;
+#   - the real barrier against fork PRs is the GitHub repository setting (approval required
+#     for all external contributors + self-hosted runner restricted to selected workflows),
+#     configured in plan C Task 2. This script is the second line of defence.
+#
 # Usage: pwsh ci/check-workflows.ps1 [-Path .github/workflows]   (exit 1 on violations)
 param([string]$Path = '.github/workflows')
 
 $ErrorActionPreference = 'Stop'
 $violations = New-Object System.Collections.Generic.List[string]
-$hosted = @('ubuntu-latest', 'windows-latest')
+$hostedRe = '^(ubuntu-latest|windows-latest)$'
+$guardStep = 'run: grep -qxF "${{ github.actor }}" ci/maintainers.txt || { echo "::error::actor not allowed on self-hosted runner"; exit 1; }'
 
 function Add-V([string]$file, [string]$rule, [string]$msg) { $script:violations.Add("${file}: [$rule] $msg") }
 function Get-Indent([string]$l) { $l.Length - $l.TrimStart().Length }
+
+# Drop a ` #...` comment, ignoring '#' inside quoted strings.
 function Remove-Comment([string]$l) {
-    if ($l -match '^\s*#') { return '' }
-    ($l -replace '\s+#.*$', '').TrimEnd()
+    $q = $null
+    for ($i = 0; $i -lt $l.Length; $i++) {
+        $c = $l[$i]
+        if ($null -ne $q) { if ($c -eq $q) { $q = $null }; continue }
+        if ($c -eq '"' -or $c -eq "'") { $q = $c; continue }
+        if ($c -eq '#' -and ($i -eq 0 -or $l[$i - 1] -match '\s')) { return $l.Substring(0, $i).TrimEnd() }
+    }
+    $l.TrimEnd()
+}
+# Comment strip + unquote keys ("jobs": -> jobs:) + unquote whole scalar values
+# (contents: 'write' -> contents: write), except runs-on (a quoted runs-on is never hosted).
+function Normalize-Line([string]$l) {
+    $l = Remove-Comment $l
+    $l = [regex]::Replace($l, '^(\s*(?:-\s*)?)(["''])([^"'']+)\2(\s*:)', '$1$3$4')
+    if ($l -notmatch '^\s*(?:-\s*)?runs-on:') {
+        $l = [regex]::Replace($l, '^(\s*(?:-\s*)?[\w-]+:\s*)(["''])([^"'']*)\2\s*$', '$1$3')
+    }
+    $l
 }
 # Split a scalar/inline-list value ("a", "[a, b]", "'x'") into trimmed items.
 function Split-Inline([string]$v) {
     $v = $v.Trim().TrimStart('[').TrimEnd(']')
     @($v -split ',' | ForEach-Object { $_.Trim().Trim("'").Trim('"') } | Where-Object { $_ -ne '' })
 }
-# Value of `key:` at the start of a line: inline items, or following `- item` block lines.
+# Items of `key:` on line $i: inline value, or following `- item` block lines.
 function Get-KeyItems([string[]]$lines, [int]$i) {
     $m = [regex]::Match($lines[$i], '^\s*[\w-]+:\s*(.*)$')
     $val = $m.Groups[1].Value.Trim()
@@ -48,14 +83,8 @@ function Get-KeyItems([string[]]$lines, [int]$i) {
 
 function Test-Workflow([IO.FileInfo]$f) {
     $name = $f.Name
-    $lines = @(Get-Content -LiteralPath $f.FullName | ForEach-Object { Remove-Comment $_ })
+    $lines = @(Get-Content -LiteralPath $f.FullName | ForEach-Object { Normalize-Line $_ })
 
-    # ---- top-level sections ----
-    $onIdx = -1; $jobsIdx = -1
-    for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -match '^["'']?on["'']?:') { $onIdx = $i }
-        if ($lines[$i] -match '^jobs:\s*$') { $jobsIdx = $i }
-    }
     function Get-SectionEnd([int]$start) {
         for ($j = $start + 1; $j -lt $lines.Count; $j++) {
             if ($lines[$j].Trim() -ne '' -and (Get-Indent $lines[$j]) -eq 0) { return $j }
@@ -63,13 +92,19 @@ function Test-Workflow([IO.FileInfo]$f) {
         $lines.Count
     }
 
+    $onIdx = -1; $jobsIdx = -1; $permIdx = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^on:') { $onIdx = $i }
+        if ($lines[$i] -match '^jobs:\s*$') { $jobsIdx = $i }
+        if ($lines[$i] -match '^permissions:') { $permIdx = $i }
+    }
+
     # ---- on: triggers ----
-    $triggers = @{}      # trigger -> block lines (string[])
-    $onUnsupported = $false
+    $triggers = @{}
     if ($onIdx -ge 0) {
         $onEnd = Get-SectionEnd $onIdx
-        $inline = ($lines[$onIdx] -replace '^["'']?on["'']?:\s*', '').Trim()
-        if ($inline -match '\{') { $onUnsupported = $true }
+        $inline = ($lines[$onIdx] -replace '^on:\s*', '').Trim()
+        if ($inline -match '[\{]') { Add-V $name 'a' 'unsupported inline form for on: (use block form)' }
         elseif ($inline -ne '') { foreach ($t in Split-Inline $inline) { $triggers[$t] = @() } }
         else {
             $childInd = -1
@@ -89,100 +124,104 @@ function Test-Workflow([IO.FileInfo]$f) {
                 }
             }
         }
-    }
+    } else { Add-V $name 'a' 'no on: section found' }
 
     # ---- jobs ----
-    $jobs = [ordered]@{}   # id -> @{ Lines; RunsOn; Needs }
-    if ($jobsIdx -ge 0) {
+    $jobs = [ordered]@{}
+    $jobAt = @{}      # line index -> job id
+    if ($jobsIdx -lt 0) {
+        Add-V $name 'g' 'no recognizable jobs: section (inline or missing jobs is not supported)'
+    } else {
         $jobsEnd = Get-SectionEnd $jobsIdx
-        $jobInd = -1; $cur = $null; $curLines = $null
-        $flush = {
-            if ($null -ne $cur) { $jobs[$cur] = @{ Lines = @($curLines) } }
-        }
+        $jobInd = -1; $cur = $null
         for ($j = $jobsIdx + 1; $j -lt $jobsEnd; $j++) {
             $l = $lines[$j]; if ($l.Trim() -eq '') { continue }
             if ($jobInd -lt 0) { $jobInd = Get-Indent $l }
-            if ((Get-Indent $l) -eq $jobInd -and $l -match '^\s*([\w-]+):\s*$') {
-                & $flush
-                $cur = $Matches[1]; $curLines = New-Object System.Collections.Generic.List[string]
-            } elseif ($null -ne $cur) { $curLines.Add($l) }
+            if ((Get-Indent $l) -eq $jobInd) {
+                if ($l -match '^\s*([\w-]+):\s*$') {
+                    $cur = $Matches[1]
+                    $jobs[$cur] = @{ Lines = (New-Object System.Collections.Generic.List[string]); Idx = (New-Object System.Collections.Generic.List[int]) }
+                    continue
+                } else {
+                    $cur = $null
+                    Add-V $name 'g' "unsupported job form at line $($j + 1): '$($l.Trim())' (use 'id:' block mapping)"
+                }
+            }
+            if ($null -ne $cur) { $jobs[$cur].Lines.Add($l); $jobs[$cur].Idx.Add($j); $jobAt[$j] = $cur }
         }
-        & $flush
+        if ($jobs.Count -eq 0) { Add-V $name 'g' 'jobs: section has no jobs' }
         foreach ($id in @($jobs.Keys)) {
-            $jl = $jobs[$id].Lines
-            $ro = @(); $needs = @()
-            $jInd = -1
+            $jl = @($jobs[$id].Lines)
+            $runsOn = $null; $needs = @(); $jInd = -1
             for ($k = 0; $k -lt $jl.Count; $k++) {
                 if ($jInd -lt 0) { $jInd = Get-Indent $jl[$k] }
                 if ((Get-Indent $jl[$k]) -ne $jInd) { continue }
-                if ($jl[$k] -match '^\s*runs-on:') { $ro = @(Get-KeyItems $jl $k) }
+                if ($jl[$k] -match '^\s*runs-on:\s*(\S+)\s*$') { $runsOn = $Matches[1] }
                 if ($jl[$k] -match '^\s*needs:') { $needs = @(Get-KeyItems $jl $k) }
             }
-            $jobs[$id].RunsOn = $ro
+            $jobs[$id].RunsOn = $runsOn
             $jobs[$id].Needs = $needs
-            $jobs[$id].SelfHosted = [bool]($ro -contains 'self-hosted')
+            $jobs[$id].Hosted = ($null -ne $runsOn -and $runsOn -match $hostedRe)
         }
     }
-    $selfJobs = @($jobs.Keys | Where-Object { $jobs[$_].SelfHosted })
+    $selfJobs = @($jobs.Keys | Where-Object { -not $jobs[$_].Hosted })
     $isSelf = $selfJobs.Count -gt 0
 
     # ---- global rules (all files) ----
     if ($triggers.ContainsKey('pull_request_target')) { Add-V $name 'g' 'pull_request_target is forbidden' }
     for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -match '^\s*(?:-\s*)?uses:\s*(\S+)') {
-            $u = $Matches[1].Trim("'").Trim('"')
+        $l = $lines[$i]
+        foreach ($m in [regex]::Matches($l, '(?:^\s*(?:-\s*)?|[{,]\s*)uses:\s*([^\s,}]+)')) {
+            $u = $m.Groups[1].Value.Trim("'").Trim('"')
             if ($u -notmatch '^\./' -and $u -notmatch '@[0-9a-f]{40}$') {
                 Add-V $name 'g' "uses: $u is not pinned to a 40-hex SHA (line $($i + 1))"
             }
         }
-        if ($lines[$i] -match '^\s*permissions:\s*write-all') {
+        if ($l -match '^\s*permissions:\s*[\{\[]') {
+            Add-V $name 'g' "unsupported inline form for permissions (line $($i + 1)); use a block mapping"
+        }
+        if ($l -match '^\s*permissions:\s*write-all') {
             Add-V $name 'g' "permissions: write-all is forbidden (line $($i + 1))"
         }
-    }
-    # contents: write only in job `release` of release.yml (hosted runner)
-    $inJobsRange = @{}   # line index -> job id
-    if ($jobsIdx -ge 0) {
-        $jobsEnd = Get-SectionEnd $jobsIdx
-        $curId = $null; $jobInd = -1
-        for ($j = $jobsIdx + 1; $j -lt $jobsEnd; $j++) {
-            $l = $lines[$j]; if ($l.Trim() -eq '') { continue }
-            if ($jobInd -lt 0) { $jobInd = Get-Indent $l }
-            if ((Get-Indent $l) -eq $jobInd -and $l -match '^\s*([\w-]+):\s*$') { $curId = $Matches[1] }
-            $inJobsRange[$j] = $curId
-        }
-    }
-    for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -match '^\s*contents:\s*write\b') {
-            $jid = $inJobsRange[$i]
-            if ($null -eq $jid) { Add-V $name 'g' "contents: write at workflow level (line $($i + 1))" }
-            elseif ($name -ne 'release.yml' -or $jid -ne 'release') {
-                Add-V $name 'g' "contents: write in job '$jid' (line $($i + 1)); allowed only in job 'release' of release.yml"
-            } elseif (-not ($jobs[$jid].RunsOn.Count -eq 1 -and $hosted -contains $jobs[$jid].RunsOn[0])) {
+        if ($l -match '^\s*([\w-]+):\s*write\b') {
+            $key = $Matches[1]; $jid = $jobAt[$i]
+            if ($null -eq $jid) { Add-V $name 'g' "${key}: write at workflow level (line $($i + 1))" }
+            elseif ($key -ne 'contents' -or $name -ne 'release.yml' -or $jid -ne 'release') {
+                Add-V $name 'g' "${key}: write in job '$jid' (line $($i + 1)); allowed only as 'contents: write' in job 'release' of release.yml"
+            } elseif (-not $jobs[$jid].Hosted) {
                 Add-V $name 'g' "contents: write in job 'release' requires runs-on ubuntu-latest or windows-latest (line $($i + 1))"
             }
+        }
+    }
+    # top-level permissions with contents: read
+    if ($permIdx -lt 0) {
+        Add-V $name 'g' 'missing top-level permissions: block (needs contents: read)'
+    } else {
+        $inl = ($lines[$permIdx] -replace '^permissions:\s*', '').Trim()
+        if ($inl -ne '') {
+            if ($inl -notmatch '^[\{\[]') { Add-V $name 'g' "top-level permissions must be a block mapping with 'contents: read' (found scalar '$inl')" }
+        } else {
+            $pe = Get-SectionEnd $permIdx; $ok = $false
+            for ($j = $permIdx + 1; $j -lt $pe; $j++) { if ($lines[$j] -match '^\s+contents:\s*read\s*$') { $ok = $true } }
+            if (-not $ok) { Add-V $name 'g' "top-level permissions lacks 'contents: read'" }
         }
     }
 
     if (-not $isSelf) { return }
 
     # ---- rule a ----
-    if ($onUnsupported) { Add-V $name 'a' 'inline mapping for on: is not supported by this checker; use block form' }
     foreach ($t in $triggers.Keys) {
         if ($t -notin 'push', 'workflow_dispatch') { Add-V $name 'a' "trigger '$t' not allowed on self-hosted workflows (only push, workflow_dispatch)" }
     }
-    if ($triggers.Count -eq 0 -and -not $onUnsupported) { Add-V $name 'a' 'no on: triggers found' }
+    if ($triggers.Count -eq 0 -and $onIdx -ge 0 -and $lines[$onIdx] -notmatch '\{') { Add-V $name 'a' 'no on: triggers found' }
 
     # ---- rule b ----
     if ($triggers.ContainsKey('push')) {
-        $pb = @($triggers['push'])
+        $pb = @($triggers['push'] | ForEach-Object { $_ -replace '^\s*\{', '' -replace '\}\s*$', '' })
         $branches = $null; $tags = $null
         for ($i = 0; $i -lt $pb.Count; $i++) {
-            if ($pb[$i] -match '^\s*\{?\s*branches:') {
-                $branches = @(Get-KeyItems ($pb -replace '^\s*\{', '' -replace '\}\s*$', '') $i)
-            }
-            if ($pb[$i] -match '^\s*\{?\s*tags:') {
-                $tags = @(Get-KeyItems ($pb -replace '^\s*\{', '' -replace '\}\s*$', '') $i)
-            }
+            if ($pb[$i] -match '^\s*branches:') { $branches = @(Get-KeyItems $pb $i) }
+            if ($pb[$i] -match '^\s*tags:') { $tags = @(Get-KeyItems $pb $i) }
         }
         if ($null -eq $branches -and $null -eq $tags) {
             Add-V $name 'b' "push needs branches: [main] and/or tags: ['v*']"
@@ -200,18 +239,28 @@ function Test-Workflow([IO.FileInfo]$f) {
         Add-V $name 'c' "no 'guard' job found"
     } else {
         $g = $jobs['guard']
-        if (-not ($g.RunsOn.Count -eq 1 -and $hosted -contains $g.RunsOn[0])) {
-            Add-V $name 'c' "'guard' job must run on ubuntu-latest or windows-latest (found: $($g.RunsOn -join ', '))"
+        if ($g.RunsOn -ne 'ubuntu-latest') {
+            Add-V $name 'c' "'guard' job must have runs-on: ubuntu-latest (found: $($g.RunsOn))"
         }
-        $gt = $g.Lines -join "`n"
-        if ($gt -notmatch 'github\.actor' -or $gt -notmatch 'maintainers\.txt' -or $gt -notmatch '\bexit 1\b') {
-            Add-V $name 'c' "'guard' job must check github.actor against ci/maintainers.txt and 'exit 1' when not listed"
+        $found = $false
+        foreach ($l in $g.Lines) {
+            $t = ($l.Trim() -replace '^-\s*', '')
+            if ($t -ceq $guardStep) { $found = $true }
+            if ($l -match '^\s*(?:-\s*)?(if|continue-on-error|shell):') {
+                Add-V $name 'c' "'guard' job must not use '$($Matches[1]):'"
+            }
         }
+        if (-not $found) { Add-V $name 'c' "'guard' job lacks the exact step: $guardStep" }
     }
     foreach ($id in $selfJobs) {
+        if ($id -eq 'guard') { continue }
         if ($jobs[$id].Needs -notcontains 'guard') { Add-V $name 'c' "self-hosted job '$id' lacks needs: guard" }
+        foreach ($l in $jobs[$id].Lines) {
+            if ($l -match '^\s*(?:-\s*)?if:.*\b(always|failure|cancelled)\s*\(') {
+                Add-V $name 'c' "self-hosted job '$id' uses $($Matches[1])() in an if: condition, which can bypass the guard"
+            }
+        }
     }
-
     # ---- rule d ----
     for ($i = 0; $i -lt $lines.Count; $i++) {
         if ($lines[$i] -match '^\s*[\w-]+:\s*write\b') {

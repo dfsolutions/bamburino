@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # v7.0.1
         with: { sparse-checkout: ci/maintainers.txt }
-      - run: grep -qx "${{ github.actor }}" ci/maintainers.txt || { echo "::error::actor not allowed on self-hosted runner"; exit 1; }
+      - run: grep -qxF "${{ github.actor }}" ci/maintainers.txt || { echo "::error::actor not allowed on self-hosted runner"; exit 1; }
   build:
     runs-on: [self-hosted, windows]
     steps:
