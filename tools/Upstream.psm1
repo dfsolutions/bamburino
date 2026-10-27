@@ -18,9 +18,10 @@ function Get-Upstream {
         $t = $line.Trim()
         if ($t -eq '' -or $t.StartsWith('#')) { continue }
         if ($t -match '^\[([A-Za-z0-9_.-]+)\]$') { $section = $Matches[1]; continue }
-        if ($t -match '^([A-Za-z0-9_-]+)\s*=\s*(?:"([^"]*)"|(-?\d+))\s*(?:#.*)?$') {
-            $value = if ($null -ne $Matches[2] -and $Matches[2] -ne '' -or $t -match '=\s*""') { $Matches[2] } else { $Matches[3] }
-            $result["$section.$($Matches[1])"] = $value
+        if ($t -match '^(?<name>[A-Za-z0-9_-]+)\s*=\s*(?:"(?<str>[^"]*)"|(?<num>-?\d+))\s*(?:#.*)?$') {
+            $name = $Matches['name']
+            $value = if ($Matches.ContainsKey('str')) { $Matches['str'] } else { $Matches['num'] }
+            $result["$section.$name"] = $value
         }
     }
     return $result
