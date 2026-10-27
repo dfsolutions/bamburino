@@ -44,7 +44,11 @@ function Remove-Comment([string]$l) {
     $q = $null
     for ($i = 0; $i -lt $l.Length; $i++) {
         $c = $l[$i]
-        if ($null -ne $q) { if ($c -eq $q) { $q = $null }; continue }
+        if ($null -ne $q) {
+            if ($c -eq '\' -and $q -eq '"') { $i++; continue }   # escaped char inside "..."
+            if ($c -eq $q) { $q = $null }
+            continue
+        }
         if ($c -eq '"' -or $c -eq "'") { $q = $c; continue }
         if ($c -eq '#' -and ($i -eq 0 -or $l[$i - 1] -match '\s')) { return $l.Substring(0, $i).TrimEnd() }
     }
@@ -55,6 +59,9 @@ function Remove-Comment([string]$l) {
 function Normalize-Line([string]$l) {
     $l = Remove-Comment $l
     $l = [regex]::Replace($l, '^(\s*(?:-\s*)?)(["''])([^"'']+)\2(\s*:)', '$1$3$4')
+    # `key : value` -> `key: value` (first colon after a plain key only)
+    $l = [regex]::Replace($l, '^(\s*(?:-\s*)?[\w-]+)\s+:(?=\s|$)\s*', '$1: ')
+    $l = $l -replace ':\s+$', ':'
     if ($l -notmatch '^\s*(?:-\s*)?runs-on:') {
         $l = [regex]::Replace($l, '^(\s*(?:-\s*)?[\w-]+:\s*)(["''])([^"'']*)\2\s*$', '$1$3')
     }
@@ -97,6 +104,23 @@ function Test-Workflow([IO.FileInfo]$f) {
         if ($lines[$i] -match '^on:') { $onIdx = $i }
         if ($lines[$i] -match '^jobs:\s*$') { $jobsIdx = $i }
         if ($lines[$i] -match '^permissions:') { $permIdx = $i }
+    }
+
+    # ---- unsupported structure: multi-document, duplicate top-level keys ----
+    $seen = $false; $topKeys = @{}
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $l = $lines[$i]
+        if ($l.Trim() -eq '') { continue }
+        if ($l -match '^(---|\.\.\.)(\s|$)') {
+            if ($seen) { Add-V $name 'g' "multi-document YAML is not supported (line $($i + 1))" }
+            continue
+        }
+        $seen = $true
+        if ($l -match '^([\w-]+):') {
+            $k = $Matches[1]
+            if ($topKeys.ContainsKey($k)) { Add-V $name 'g' "duplicate top-level key '$k' (line $($i + 1)): unsupported form" }
+            $topKeys[$k] = $true
+        }
     }
 
     # ---- on: triggers ----
@@ -161,7 +185,7 @@ function Test-Workflow([IO.FileInfo]$f) {
             }
             $jobs[$id].RunsOn = $runsOn
             $jobs[$id].Needs = $needs
-            $jobs[$id].Hosted = ($null -ne $runsOn -and $runsOn -match $hostedRe)
+            $jobs[$id].Hosted = ($null -ne $runsOn -and $runsOn -cmatch $hostedRe)
         }
     }
     $selfJobs = @($jobs.Keys | Where-Object { -not $jobs[$_].Hosted })
@@ -171,7 +195,7 @@ function Test-Workflow([IO.FileInfo]$f) {
     if ($triggers.ContainsKey('pull_request_target')) { Add-V $name 'g' 'pull_request_target is forbidden' }
     for ($i = 0; $i -lt $lines.Count; $i++) {
         $l = $lines[$i]
-        foreach ($m in [regex]::Matches($l, '(?:^\s*(?:-\s*)?|[{,]\s*)uses:\s*([^\s,}]+)')) {
+        foreach ($m in [regex]::Matches($l, '(?:^\s*(?:-\s*)?|[{,]\s*)uses\s*:\s*([^\s,}]+)')) {
             $u = $m.Groups[1].Value.Trim("'").Trim('"')
             if ($u -notmatch '^\./' -and $u -notmatch '@[0-9a-f]{40}$') {
                 Add-V $name 'g' "uses: $u is not pinned to a 40-hex SHA (line $($i + 1))"
@@ -239,18 +263,31 @@ function Test-Workflow([IO.FileInfo]$f) {
         Add-V $name 'c' "no 'guard' job found"
     } else {
         $g = $jobs['guard']
-        if ($g.RunsOn -ne 'ubuntu-latest') {
+        if ($g.RunsOn -cne 'ubuntu-latest') {
             Add-V $name 'c' "'guard' job must have runs-on: ubuntu-latest (found: $($g.RunsOn))"
         }
-        $found = $false
-        foreach ($l in $g.Lines) {
-            $t = ($l.Trim() -replace '^-\s*', '')
-            if ($t -ceq $guardStep) { $found = $true }
-            if ($l -match '^\s*(?:-\s*)?(if|continue-on-error|shell):') {
+        # Structural check: the guard job must be exactly the template, nothing else.
+        $gl = @($g.Lines)
+        foreach ($l in $gl) {
+            if ($l -match '^\s*(?:-\s*)?(if|continue-on-error|shell|env):') {
                 Add-V $name 'c' "'guard' job must not use '$($Matches[1]):'"
             }
         }
-        if (-not $found) { Add-V $name 'c' "'guard' job lacks the exact step: $guardStep" }
+        $ok = $false
+        if ($gl.Count -eq 5) {
+            $j0 = Get-Indent $gl[0]; $s0 = Get-Indent $gl[2]
+            $ok = ($gl[0].Trim() -ceq 'runs-on: ubuntu-latest') -and
+                  ($gl[1].Trim() -ceq 'steps:') -and ((Get-Indent $gl[1]) -eq $j0) -and
+                  ($s0 -gt $j0) -and
+                  ($gl[2].Trim() -cmatch '^- uses: actions/checkout@[0-9a-f]{40}$') -and
+                  ((Get-Indent $gl[3]) -eq ($s0 + 2)) -and
+                  ($gl[3].Trim() -ceq 'with: { sparse-checkout: ci/maintainers.txt }') -and
+                  ((Get-Indent $gl[4]) -eq $s0) -and
+                  ($gl[4].Trim() -ceq "- $guardStep")
+        }
+        if (-not $ok) {
+            Add-V $name 'c' "'guard' job must be exactly: runs-on: ubuntu-latest; steps: [ - uses: actions/checkout@<40-hex sha> with { sparse-checkout: ci/maintainers.txt }, - $guardStep ] (no block scalars, extra steps or keys)"
+        }
     }
     foreach ($id in $selfJobs) {
         if ($id -eq 'guard') { continue }

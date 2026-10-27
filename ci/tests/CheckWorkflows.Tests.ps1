@@ -55,7 +55,14 @@ $expect = [ordered]@{
     'bad-fake-guard.yml' = 'c'; 'bad-quoted-writeall.yml' = 'd'; 'bad-no-permissions.yml' = 'g'
     'bad-workflow-run.yml' = 'a'; 'bad-guard-continue-on-error.yml' = 'c'; 'bad-guard-no-F.yml' = 'c'
     'bad-flow-uses.yml' = 'g'
+    'bad-if-space.yml' = 'c'; 'bad-perm-space.yml' = 'd'; 'bad-guard-heredoc.yml' = 'c'
+    'bad-flow-escape.yml' = 'g'; 'bad-duplicate-on.yml' = 'g'; 'bad-multidoc.yml' = 'g'; 'bad-guard-case.yml' = 'c'
 }
+Assert-True ($r.Out -match 'bad-flow-escape\.yml.*evil/x@v1') 'bad-flow-escape.yml: hidden unpinned uses is detected'
+Assert-True ($r.Out -match 'bad-duplicate-on\.yml.*duplicate top-level key .on.') 'bad-duplicate-on.yml: duplicate on reported'
+Assert-True ($r.Out -match 'bad-multidoc\.yml.*multi-document') 'bad-multidoc.yml: multi-document reported'
+Assert-True ($r.Out -match 'bad-if-space\.yml.*always') 'bad-if-space.yml: always() detected through `if :`'
+Assert-True ($r.Out -match 'bad-perm-space\.yml.*contents: write') 'bad-perm-space.yml: write detected through `contents :`'
 foreach ($k in $expect.Keys) {
     $rule = $expect[$k]
     Assert-True ($r.Out -match ([regex]::Escape($k) + ".*\[$rule\]")) "$k reported with rule $rule"
