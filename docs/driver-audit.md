@@ -2,7 +2,7 @@
 
 Audited code: `bambulab/BambuStudio` PR #12485 by otarkhan, head `c31e97108e4d1ea137f90a075502e4d4536535fe`, diffed against
 `da8b44ee34dd349f2ae0df3f1cbae366df482354` and frozen in `driver/patches/0001-pr12485-native-mcp-server.diff`
-(41 files, +12995/-108, `patch_id` `1c5c9e30ce52`). The patch applies cleanly on tag `v02.08.04.57` (`f977235e`).
+(41 files, +12995/-108, `patch_id` `1c5c9e30ce52`, historical value for 0001 only; current value in `driver/upstream.toml`). The patch applies cleanly on tag `v02.08.04.57` (`f977235e`).
 Line numbers refer to the PR files at `c31e971`. Unless a path is given, `McpTools.cpp`, `McpAdvanced.inc`, `McpBatch.inc`,
 `McpDevices.inc`, `McpPreview.inc`, `Plater.cpp` and `GUI_ObjectList.cpp` are in `src/slic3r/GUI/`, and `McpServer.cpp` and `UndoRedo.cpp` are in `src/slic3r/Utils/`.
 

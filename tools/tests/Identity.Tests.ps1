@@ -54,11 +54,23 @@ foreach ($pair in @('\{"appVersion", SLIC3R_VERSION\}', '\{"buildSuffix", BAMBUR
     if ($body -notmatch $pair) { throw "app.get_capabilities response lacks $pair" }
 }
 
+# Identity reaches only the two consumers, through a generated header: no global compile definition, so a new
+# patch_id does not rebuild the tree or the precompiled header.
 $cmake = Get-Content -LiteralPath (Join-Path $clone 'CMakeLists.txt') -Raw
+if ($cmake -match '(add_compile_definitions|add_definitions)\([^)]*BAMBURINO_') { throw 'CMakeLists.txt defines BAMBURINO_* globally' }
+if ($cmake -notmatch 'configure_file\(\$\{LIBDIR\}/slic3r/GUI/bamburino_identity\.h\.in \$\{LIBDIR_BIN\}/platform/bamburino_identity\.h @ONLY\)') { throw 'CMakeLists.txt does not generate bamburino_identity.h' }
+if ($cmake -notmatch 'set\(_bamburino_value "unknown"\)') { throw 'CMakeLists.txt lacks the "unknown" default' }
+if ($cmake -notmatch 'unset\(\$\{_bamburino_var\} CACHE\)') { throw 'CMakeLists.txt keeps the identity in the cache (stale value on a configure without -D)' }
+$tmpl = Get-Content -LiteralPath (Join-Path $clone 'src/slic3r/GUI/bamburino_identity.h.in') -Raw
 foreach ($v in 'BAMBURINO_PATCH_ID', 'BAMBURINO_BUILD_SUFFIX') {
-    if ($cmake -notmatch "add_compile_definitions\(\s*$v=`"\`$\{$v\}`"\s*\)") { throw "CMakeLists.txt lacks add_compile_definitions($v=`"`${$v}`")" }
-    if ($cmake -notmatch "set\(\s*$v\s+`"unknown`"\s+CACHE\s+STRING") { throw "CMakeLists.txt lacks the 'unknown' default for $v" }
+    if ($tmpl -notmatch "#define $v `"@$v@`"") { throw "bamburino_identity.h.in lacks #define $v `"@$v@`"" }
 }
+$includers = @(& git -C $clone grep -l '#include "bamburino_identity.h"' -- 'src' | ForEach-Object { $_.Trim() } | Sort-Object)
+if (($includers -join '|') -ne 'src/slic3r/GUI/AboutDialog.cpp|src/slic3r/GUI/McpTools.cpp') { throw "bamburino_identity.h included by: $($includers -join ', ')" }
 
 $about = Get-Content -LiteralPath (Join-Path $clone 'src/slic3r/GUI/AboutDialog.cpp') -Raw
-if ($about -notmatch 'BAMBURINO_BUILD_SUFFIX') { throw 'AboutDialog.cpp does not show BAMBURINO_BUILD_SUFFIX' }
+$ctor = $about.IndexOf('AboutDialog::AboutDialog()')
+$fallback = $about.IndexOf('#define BAMBURINO_BUILD_SUFFIX')
+$use = $about.IndexOf('version_string += wxString::FromUTF8(" (" BAMBURINO_BUILD_SUFFIX ")");')
+if ($ctor -lt 0 -or $use -lt $ctor) { throw 'AboutDialog constructor does not append BAMBURINO_BUILD_SUFFIX to the version' }
+if ($fallback -lt 0 -or $fallback -gt $ctor) { throw 'AboutDialog.cpp BAMBURINO_BUILD_SUFFIX fallback is not at file top' }

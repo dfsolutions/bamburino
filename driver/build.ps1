@@ -21,8 +21,9 @@
     call fetch; an 'all' step runs fetch only when the clone is missing.
     Build identity: the app step must pass Get-IdentityCMakeDefines to CMake (-DBAMBURINO_PATCH_ID=<patch_id>
     -DBAMBURINO_BUILD_SUFFIX=<build_suffix_prefix>.<patch_id>) and write its CMake command line to the step log.
-    Patch 0100-build-identity.diff turns them into compile definitions read by app.get_capabilities
-    (buildSuffix, patchId) and the About dialog; SLIC3R_VERSION and version.inc are not changed.
+    Patch 0100-build-identity.diff writes them into a generated header (bamburino_identity.h, "unknown" when not
+    passed) read only by app.get_capabilities (buildSuffix, patchId) and the About dialog; SLIC3R_VERSION and
+    version.inc are not changed.
     Exit codes: 0 ok; 20 clone dirty (fetch) or patch does not apply (patch);
                 21 clone at an unexpected state (fetch, patch) or patch_id mismatch (patch); 1 any other error.
 #>

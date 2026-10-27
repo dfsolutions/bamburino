@@ -22,8 +22,8 @@ foreach ($d in Get-ChildItem "$PSScriptRoot/../../driver/patches" -Filter '*.dif
 }
 $expectedFiles = $touched.Count
 if ($patchCount -eq 1 -and $expectedFiles -ne 41) { throw "patch 0001 alone should touch 41 files, counted $expectedFiles" }
-if ((Test-Path "$PSScriptRoot/../../driver/patches/0100-build-identity.diff") -and $patchCount -eq 2 -and $expectedFiles -ne 43) {
-    throw "patches 0001 + 0100 should touch 43 distinct files (41 + CMakeLists.txt + AboutDialog.cpp), counted $expectedFiles"
+if ((Test-Path "$PSScriptRoot/../../driver/patches/0100-build-identity.diff") -and $patchCount -eq 2 -and $expectedFiles -ne 44) {
+    throw "patches 0001 + 0100 should touch 44 distinct files (41 + CMakeLists.txt, AboutDialog.cpp, bamburino_identity.h.in), counted $expectedFiles"
 }
 
 # Two consecutive runs: both succeed and leave the same tree.
