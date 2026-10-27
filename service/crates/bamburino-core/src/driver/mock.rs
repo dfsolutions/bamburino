@@ -62,6 +62,7 @@ struct State {
     snapshots: Vec<Snapshot>,
     snapshot_time: u64,
     undo_snapshot: Option<String>,
+    undo_snapshot_supported: bool,
     // plate revisions: revision string -> edit epoch at issue time
     epoch: u64,
     revision_counter: u64,
@@ -227,6 +228,7 @@ impl MockDriver {
                 patch_id: build_info::EXPECTED_PATCH_ID.map(str::to_string),
                 session_id: "mock-session".to_string(),
                 unreachable: false,
+                undo_snapshot_supported: true,
                 modal_open: false,
                 fail_next: None,
                 delay_next: None,
@@ -300,6 +302,28 @@ impl MockDriver {
     /// Overrides `statistics.estimatedNormalTime` reported by `slice_state`.
     pub fn set_estimated_time(&self, seconds: Option<f64>) {
         self.lock().estimated_time_s = seconds;
+    }
+
+    /// Whether `app_get_state` reports `undoSnapshot` (plan A patch 0120).
+    /// Default true; false simulates a build without the patch.
+    pub fn set_undo_snapshot_supported(&self, supported: bool) {
+        self.lock().undo_snapshot_supported = supported;
+    }
+
+    /// Simulates the user adding a per-object override in the GUI.
+    pub fn user_object_override(&self, key: &str, value: &str) {
+        let mut st = self.lock();
+        st.take_snapshot();
+        st.object_overrides
+            .insert(key.to_string(), value.to_string());
+    }
+
+    /// Simulates the user adding a per-plate override in the GUI.
+    pub fn user_plate_override(&self, key: &str, value: &str) {
+        let mut st = self.lock();
+        st.take_snapshot();
+        st.plate_overrides
+            .insert(key.to_string(), value.to_string());
     }
 
     pub fn set_modal(&self, open: bool) {
@@ -376,7 +400,10 @@ impl DriverClient for MockDriver {
             object_count: 1,
             plate_count: 1,
             selected_plate_index: 0,
-            undo_snapshot: st.undo_snapshot.clone(),
+            undo_snapshot: st
+                .undo_snapshot_supported
+                .then(|| st.undo_snapshot.clone())
+                .flatten(),
         })
     }
 
