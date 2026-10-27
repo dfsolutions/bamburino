@@ -25,6 +25,9 @@ if ($patchCount -eq 1 -and $expectedFiles -ne 41) { throw "patch 0001 alone shou
 if ((Test-Path "$PSScriptRoot/../../driver/patches/0100-build-identity.diff") -and $patchCount -eq 2 -and $expectedFiles -ne 44) {
     throw "patches 0001 + 0100 should touch 44 distinct files (41 + CMakeLists.txt, AboutDialog.cpp, bamburino_identity.h.in), counted $expectedFiles"
 }
+if ((Test-Path "$PSScriptRoot/../../driver/patches/0120-expose-undo-snapshot.diff") -and $patchCount -eq 3 -and $expectedFiles -ne 44) {
+    throw "patches 0001 + 0100 + 0120 should touch 44 distinct files (0120 only touches McpTools.cpp, already in 0001), counted $expectedFiles"
+}
 
 # Two consecutive runs: both succeed and leave the same tree.
 $r1 = Invoke-PatchStep

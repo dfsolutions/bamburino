@@ -159,6 +159,13 @@ This section checks the draft table "`DriverClient` method → driver tool" in p
 
 `DriverTool::PlateSelect.is_mutation()` must return `true`: `plate_select` takes an undo snapshot and invalidates plate revisions (Findings 14).
 
+## Revision contract
+
+Decided in Task 7 from Findings 1 and 12.
+
+- Undo snapshots before mutation: no patch. `take_snapshot` is already called before the mutation in all three paths (Findings 1), so `0110-snapshot-settings-update.diff`, `0111-snapshot-object-transform.diff` and `0112-snapshot-settings-override.diff` are not created. `tools/tests/Snapshot.Tests.ps1` keeps that order checked on the patched clone (`take_snapshot(` on an earlier line than `tab->load_config(candidate)`, `instance->set_offset/...`, and the `update_overrides` config assignment). Whether undo actually reverts a process-preset edit (Open questions 1) is still for Task 9.
+- Undo snapshot identifier: patch `0120-expose-undo-snapshot.diff`. `app.get_state` (`app_state` in `GUI/McpTools.cpp`) gains `"undoSnapshot": "<decimal string>"` = `std::to_string(plater.get_active_snapshot_time())`, the active `UndoRedo::Stack` snapshot time (Findings 12). It changes on every `take_snapshot`, undo and redo,; `UndoRedo::Stack::clear` resets it to `"0"` (`Utils/UndoRedo.cpp:556`). `Plater::get_active_snapshot_time()` is already public and already used by `plate_fingerprint`; no accessor and no new counter were added. Plan B parses it into `AppState.undo_snapshot: Option<String>` (string or number accepted) and falls back to the state hash (§13.2b) when the field is absent.
+
 ## Findings
 
 ### 1. take_snapshot before mutation
