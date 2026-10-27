@@ -88,6 +88,13 @@ function Stop-Runner {
         [int]$GracefulSec = 20,
         [int]$OfflineSec = 90,
         [scriptblock]$GetProcs = { @(Get-Process -Name 'Runner.Listener', 'Runner.Worker' -ErrorAction SilentlyContinue) },
+        [scriptblock]$GetProcInfo = {
+            param($ProcId)
+            $p = Get-Process -Id $ProcId -ErrorAction SilentlyContinue
+            if (-not $p) { return $null }
+            $c = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcId" -ErrorAction SilentlyContinue
+            @{ Name = $p.ProcessName; StartTime = $p.StartTime; CommandLine = $c.CommandLine }
+        },
         [scriptblock]$Graceful = { param($ProcId) & taskkill.exe /PID $ProcId /T 2>&1 | Out-Null },
         [scriptblock]$Force = { param($Procs) $Procs | Stop-Process -Force -ErrorAction SilentlyContinue },
         [scriptblock]$GetStatus = {
@@ -100,10 +107,29 @@ function Stop-Runner {
         [scriptblock]$Sleep = { param($Sec) Start-Sleep -Seconds $Sec },
         [scriptblock]$Log = { param($Msg) Write-Host $Msg }
     )
+    # Pid file: line 1 = pid, line 2 = StartTime (round-trip ISO), line 3 = full path of run.cmd.
+    # The pid is acted on only if that process is still the launcher we started (a pid can be
+    # reassigned after a reboot or after the window was closed): cmd.exe, same start time (+-1 s),
+    # command line mentioning the recorded run.cmd.
     $launcher = $null
     if (Test-Path -LiteralPath $PidFile) {
-        $t = (Get-Content -LiteralPath $PidFile -Raw).Trim()
-        if ($t -match '^\d+$') { $launcher = [int]$t }
+        $valid = $false
+        $l = @(Get-Content -LiteralPath $PidFile -ErrorAction SilentlyContinue)
+        if ($l.Count -ge 3 -and "$($l[0])".Trim() -match '^\d+$') {
+            $id = [int]"$($l[0])".Trim()
+            try {
+                $rec = [datetime]::Parse("$($l[1])".Trim(), [cultureinfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+                $info = & $GetProcInfo $id
+                if ($info -and $info.Name -ieq 'cmd' -and
+                    [math]::Abs(($info.StartTime.ToUniversalTime() - $rec.ToUniversalTime()).TotalSeconds) -le 1 -and
+                    "$($info.CommandLine)".IndexOf("$($l[2])".Trim(), [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                    $valid = $true
+                }
+            } catch { $valid = $false }
+        }
+        if ($valid) { $launcher = $id }
+        else { & $Log 'stale pid file, ignored' }
+        if (-not $valid) { Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue }
     }
     if ($launcher) { & $Graceful $launcher }
     $waited = 0

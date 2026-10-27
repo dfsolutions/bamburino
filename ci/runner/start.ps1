@@ -7,5 +7,7 @@ $ErrorActionPreference = 'Stop'
 $run = Join-Path $RunnerDir 'run.cmd'
 if (-not (Test-Path -LiteralPath $run)) { throw "run.cmd not found in $RunnerDir; run ci/runner/register.ps1 first" }
 $proc = Start-Process -FilePath $run -WorkingDirectory $RunnerDir -PassThru
-Set-Content -LiteralPath (Join-Path $RunnerDir '.bamburino-runner.pid') -Value $proc.Id -Encoding ascii
+# pid + start time + run.cmd path: stop.ps1 refuses to act on a pid that is no longer this launcher.
+$started = $proc.StartTime.ToUniversalTime().ToString('o')
+Set-Content -LiteralPath (Join-Path $RunnerDir '.bamburino-runner.pid') -Value @($proc.Id, $started, (Resolve-Path -LiteralPath $run).Path) -Encoding ascii
 Write-Host "Runner started in a new window ($RunnerDir). It is listening when the window shows 'Listening for Jobs'."

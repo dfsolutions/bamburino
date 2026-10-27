@@ -44,6 +44,17 @@ Closing the window with the X, or killing the processes by hand, leaves the runn
 `online` on GitHub for about a minute; a job queued in that window is assigned to a runner that is
 gone and stalls. Use `stop.ps1` and trust its exit code.
 
+Details worth knowing:
+
+- The pid file holds the pid, the process start time and the `run.cmd` path. `stop.ps1` acts on
+  that pid only if the process is still `cmd.exe`, started within a second of the recorded time and
+  running that `run.cmd`; otherwise it logs `stale pid file, ignored`, deletes the file and uses the
+  name-based fallback (a pid can be reassigned after a reboot or a window close).
+- The name-based fallback stops **any** `Runner.Listener` / `Runner.Worker` process on the machine,
+  not only the one started by `start.ps1`.
+- A runner that GitHub no longer lists (`absent`, for example after `config.cmd remove`) counts as
+  success, the same as `offline`.
+
 ### Remove
 
 To remove it for good:

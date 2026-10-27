@@ -60,19 +60,24 @@ function New-StopFake($procsAfterGraceful, $statuses) {
     $s
 }
 $pidf = Join-Path ([IO.Path]::GetTempPath()) "bb-test-$([guid]::NewGuid()).pid"
+$script:logged = New-Object System.Collections.Generic.List[string]
+$runCmd = 'D:' + [char]92 + 'bb' + [char]92 + 'runner' + [char]92 + 'run.cmd'
+$when = [datetime]::UtcNow.AddMinutes(-5)
+$script:procInfo = { param($i) @{ Name = 'cmd'; StartTime = $when; CommandLine = ('cmd.exe /c ' + [char]34 + $runCmd + [char]34) } }.GetNewClosure()
+function Write-Pid($id, $t = $when) { Set-Content $pidf @($id, $t.ToString('o'), $runCmd) }
 function Invoke-StopFake($s, $off = 90) {
     Stop-Runner -PidFile $pidf -OfflineSec $off -GracefulSec 3 -GetProcs $s.GetProcs -Graceful $s.Graceful -Force $s.Force `
-        -GetStatus $s.GetStatus -Sleep $s.Sleep -Log { param($m) }
+        -GetProcInfo $script:procInfo -GetStatus $s.GetStatus -Sleep $s.Sleep -Log { param($m) $script:logged.Add($m) }
 }
 # graceful path: processes exit, runner goes online -> offline
-Set-Content $pidf '4242'
+Write-Pid 4242
 $s = New-StopFake 'exit' @('online', 'online', 'offline')
 if (-not (Invoke-StopFake $s)) { throw 'stop: graceful path must succeed' }
 if ($s.log -notcontains 'graceful 4242') { throw 'stop: pid file not used' }
 if ($s.log -contains 'force') { throw 'stop: forced although graceful worked' }
 if (Test-Path $pidf) { throw 'stop: pid file not removed' }
 # fallback: processes survive graceful stop -> forced
-Set-Content $pidf '4242'
+Write-Pid 4242
 $s = New-StopFake 'stay' @('offline')
 if (-not (Invoke-StopFake $s)) { throw 'stop: fallback path must succeed' }
 if ($s.log -notcontains 'force') { throw 'stop: must force after timeout' }
@@ -81,10 +86,35 @@ $s = New-StopFake 'stay' @('absent')
 if (-not (Invoke-StopFake $s)) { throw 'stop: no pid file must still succeed' }
 if (@($s.log | Where-Object { $_ -like 'graceful*' }).Count) { throw 'stop: graceful without pid' }
 # GitHub never reports offline -> failure
-Set-Content $pidf '4242'
+Write-Pid 4242
 $s = New-StopFake 'exit' @('online')
 if (Invoke-StopFake $s 10) { throw 'stop: must fail while GitHub says online' }
 # processes that cannot be killed -> failure
 $s = New-StopFake 'stay' @('offline'); $s.Force = { param($p) }
 if (Invoke-StopFake $s) { throw 'stop: must fail when processes survive' }
+
+# stale pid: process gone, wrong name, different start time, old one-line format -> ignored, no graceful, file deleted
+foreach ($case in 'gone', 'name', 'time', 'oldformat') {
+    switch ($case) {
+        'gone'      { Write-Pid 4242; $script:procInfo = { param($i) $null } }
+        'name'      { Write-Pid 4242; $script:procInfo = { param($i) @{ Name = 'explorer'; StartTime = $when; CommandLine = $runCmd } }.GetNewClosure() }
+        'time'      { Write-Pid 4242; $script:procInfo = { param($i) @{ Name = 'cmd'; StartTime = $when.AddHours(1); CommandLine = $runCmd } }.GetNewClosure() }
+        'oldformat' { Set-Content $pidf '4242'; $script:procInfo = { param($i) @{ Name = 'cmd'; StartTime = $when; CommandLine = $runCmd } }.GetNewClosure() }
+    }
+    $script:logged.Clear()
+    $s = New-StopFake 'stay' @('offline')
+    if (-not (Invoke-StopFake $s)) { throw "stop stale($case): name-based fallback must still succeed" }
+    if (@($s.log | Where-Object { $_ -like 'graceful*' }).Count) { throw "stop stale($case): acted on a stale pid" }
+    if ($script:logged -notcontains 'stale pid file, ignored') { throw "stop stale($case): not logged" }
+    if (Test-Path $pidf) { throw "stop stale($case): pid file not deleted" }
+    if ($s.log -notcontains 'force') { throw "stop stale($case): fallback must stop by name" }
+}
+# matching pid -> graceful path (covered above by the first cases with the default fake); assert explicitly
+Write-Pid 4242
+$script:procInfo = { param($i) @{ Name = 'cmd'; StartTime = $when.AddMilliseconds(400); CommandLine = ('cmd.exe /c ' + [char]34 + $runCmd + [char]34) } }.GetNewClosure()
+$script:logged.Clear()
+$s = New-StopFake 'exit' @('offline')
+if (-not (Invoke-StopFake $s)) { throw 'stop match: must succeed' }
+if ($s.log -notcontains 'graceful 4242') { throw 'stop match: graceful not used' }
+if ($script:logged -contains 'stale pid file, ignored') { throw 'stop match: wrongly stale' }
 Remove-Item $pidf -ErrorAction SilentlyContinue
