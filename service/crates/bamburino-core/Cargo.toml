@@ -16,11 +16,12 @@ serde_json.workspace = true
 thiserror.workspace = true
 strsim.workspace = true
 async-trait.workspace = true
-tokio = { workspace = true, optional = true }
+tokio.workspace = true
+reqwest.workspace = true
 
 [features]
 # In-memory MockDriver for tests of the service layers.
-mock = ["dep:tokio"]
+mock = []
 
 [dev-dependencies]
-tokio.workspace = true
+wiremock.workspace = true

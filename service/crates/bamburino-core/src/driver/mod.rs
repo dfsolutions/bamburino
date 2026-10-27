@@ -4,6 +4,7 @@
 //! [`DriverClient`] is the only surface the service layers see; the HTTP
 //! implementation and the in-memory `MockDriver` both implement it.
 
+pub mod http;
 pub mod map;
 #[cfg(feature = "mock")]
 pub mod mock;
@@ -12,6 +13,7 @@ pub mod types;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub use http::{HttpDriverClient, HttpDriverConfig};
 pub use tool::DriverTool;
 pub use types::*;
 
