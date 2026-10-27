@@ -1,0 +1,156 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+#![cfg(feature = "mock")]
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use bamburino_core::driver::mock::MockDriver;
+use bamburino_core::driver::{
+    ActivePresets, AppState, DriverClient, EffectiveSetting, PlateList, SettingSource,
+};
+use bamburino_core::revision::{RevisionState, fingerprint};
+
+#[tokio::test]
+async fn first_refresh_sets_revision_one() {
+    let driver = MockDriver::new();
+    let rev = RevisionState::new();
+    assert_eq!(rev.current(), 0);
+    assert_eq!(rev.refresh(&driver).await.unwrap(), 1);
+    assert_eq!(rev.current(), 1);
+}
+
+#[tokio::test]
+async fn unchanged_state_keeps_revision() {
+    let driver = MockDriver::new();
+    let rev = RevisionState::new();
+    rev.refresh(&driver).await.unwrap();
+    // The mock issues a new plate_revision on every read.
+    let a = driver.plate_list().await.unwrap().plate_revision;
+    let b = driver.plate_list().await.unwrap().plate_revision;
+    assert_ne!(a, b);
+    assert_eq!(rev.refresh(&driver).await.unwrap(), 1);
+    assert_eq!(rev.refresh(&driver).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn user_edit_bumps_revision() {
+    let driver = MockDriver::new();
+    let rev = RevisionState::new();
+    rev.refresh(&driver).await.unwrap();
+    driver.user_edit("layer_height", "0.12");
+    assert_eq!(rev.refresh(&driver).await.unwrap(), 2);
+    assert_eq!(rev.refresh(&driver).await.unwrap(), 2);
+}
+
+#[tokio::test]
+async fn user_undo_bumps_revision() {
+    let driver = MockDriver::new();
+    driver.user_edit("layer_height", "0.12");
+    let rev = RevisionState::new();
+    rev.refresh(&driver).await.unwrap();
+    driver.user_undo();
+    assert_eq!(rev.refresh(&driver).await.unwrap(), 2);
+}
+
+fn base() -> (AppState, ActivePresets, PlateList, Vec<EffectiveSetting>) {
+    let app = AppState {
+        session_id: "s".into(),
+        app_version: "1".into(),
+        project_name: "p".into(),
+        project_path: String::new(),
+        dirty: false,
+        presets_dirty: false,
+        ui_job_running: false,
+        slicing_running: false,
+        modal_open: false,
+        object_count: 1,
+        plate_count: 1,
+        selected_plate_index: 0,
+        undo_snapshot: None,
+    };
+    let presets = ActivePresets {
+        printer: Some("P".into()),
+        process: None,
+        filaments: vec![],
+    };
+    let plates = PlateList {
+        plates: vec![],
+        selected_index: 0,
+        plate_revision: "r1".into(),
+    };
+    let settings = vec![EffectiveSetting {
+        key: "k".into(),
+        value: "v".into(),
+        source: SettingSource::Project,
+    }];
+    (app, presets, plates, settings)
+}
+
+#[test]
+fn fingerprint_ignores_volatile_fields_and_detects_hash_only_changes() {
+    let (app, presets, plates, settings) = base();
+    let f0 = fingerprint(&app, &presets, &[], &plates, &settings);
+
+    let mut volatile = app.clone();
+    volatile.session_id = "other".into();
+    volatile.ui_job_running = true;
+    volatile.slicing_running = true;
+    volatile.modal_open = true;
+    let mut plates2 = plates.clone();
+    plates2.plate_revision = "r2".into();
+    assert_eq!(
+        f0,
+        fingerprint(&volatile, &presets, &[], &plates2, &settings)
+    );
+
+    // Variant (b): no undo_snapshot, a settings change alone is visible.
+    let mut s2 = settings.clone();
+    s2[0].value = "w".into();
+    assert_ne!(f0, fingerprint(&app, &presets, &[], &plates, &s2));
+
+    // Variant (a): the undo snapshot id is part of the fingerprint.
+    let mut with_undo = app.clone();
+    with_undo.undo_snapshot = Some("7".into());
+    assert_ne!(
+        f0,
+        fingerprint(&with_undo, &presets, &[], &plates, &settings)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn poller_idle_does_not_call_driver() {
+    let driver = Arc::new(MockDriver::new());
+    let rev = Arc::new(RevisionState::new());
+    let handle = rev.clone().spawn_poller(
+        driver.clone(),
+        Duration::from_millis(1500),
+        Duration::from_secs(60),
+    );
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert!(driver.calls().is_empty());
+    assert_eq!(rev.current(), 0);
+    handle.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn poller_active_detects_user_edit() {
+    let driver = Arc::new(MockDriver::new());
+    let rev = Arc::new(RevisionState::new());
+    let handle = rev.clone().spawn_poller(
+        driver.clone(),
+        Duration::from_millis(1500),
+        Duration::from_secs(60),
+    );
+    rev.touch_client();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(rev.current(), 1);
+    driver.user_edit("layer_height", "0.12");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(rev.current(), 2);
+    // Client goes quiet: polling stops.
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    let n = driver.calls().len();
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert_eq!(driver.calls().len(), n);
+    handle.abort();
+}
