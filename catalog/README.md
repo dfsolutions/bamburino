@@ -21,5 +21,6 @@ Notes for consumers:
 - `extruder` is a deliberate scope exception: it gets the PrintRegionConfig scopes although no such class declares it.
 - Scope rule: `PrintObjectConfig` keys get `project, plate, object`; `PrintRegionConfig` keys get
   `project, plate, object, volume, height_range`; other classes get `project` only. Exceptions: the six plate-only
-  keys (`print_sequence`, ...) get `project, plate`, and `initial_layer_print_height`, `skirt_loops`, `travel_speed`
-  (global classes, but in the driver's 19-key override whitelist) also get `plate`.
+  keys (`print_sequence`, ...) get `project, plate`, and the driver override list exception: `initial_layer_print_height`,
+  `skirt_loops`, `travel_speed` (global classes, but in the driver's 19-key `override_settings()` list, which the
+  `settings.override` handler applies to every override scope) get `project, plate, object, volume`.

@@ -158,7 +158,9 @@ pub(crate) fn write_error(e: DriverError) -> ToolError {
 /// have changed (resp. not changed). An edit that lands between the
 /// pre-mutation read and the refresh is caught by the revision comparison,
 /// not by this check; one that lands during the write and adds a snapshot is
-/// not distinguishable from an undo jump.
+/// not distinguishable from an undo jump. Known limitation: a single
+/// concurrent user edit during the write window is therefore NOT caught; the
+/// window is bounded by the duration of the write.
 fn advance_ok(before: &str, after: &str, n: u32) -> bool {
     match (before.parse::<u64>(), after.parse::<u64>()) {
         (Ok(b), Ok(a)) if n == 0 => a == b,

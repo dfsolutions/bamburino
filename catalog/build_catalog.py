@@ -114,15 +114,18 @@ def generate(source, revision):
         # any other (global) class -> project only, plus the plate keys listed below.
         plate_only_keys = {"curr_bed_type", "print_sequence", "spiral_mode", "first_layer_print_sequence",
                            "other_layers_print_sequence", "other_layers_print_sequence_nums"}
-        # Keys of the driver's 19-key `override_settings()` whitelist (docs/driver-audit.md, item 5) that
-        # belong to global classes: the driver still accepts them in a plate override.
+        # Driver override list exception: keys of the driver's 19-key `override_settings()` whitelist
+        # (McpTools.cpp) that belong to global classes. The `settings.override` handler checks that list for
+        # every override scope (plate, object, volume) without filtering per scope, so they get all three.
         plate_override_extra = {"initial_layer_print_height", "skirt_loops", "travel_speed"}
         if key in object_keys or key in region_keys or key in plate_only_keys or key in plate_override_extra:
             option["scopes"].append("plate")
-        if key in object_keys or key in region_keys or key == "extruder":
+        if key in object_keys or key in region_keys or key == "extruder" or key in plate_override_extra:
             option["scopes"].append("object")
         if key in region_keys or key == "extruder":
             option["scopes"] += ["volume", "height_range"]
+        elif key in plate_override_extra:
+            option["scopes"].append("volume")
         if key.startswith("filament_"):
             option["scopes"].append("filament")
         for field, dest in [("label", "label"), ("tooltip", "description"), ("category", "category"),

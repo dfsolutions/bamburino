@@ -70,6 +70,11 @@ class CatalogTest(unittest.TestCase):
         for k in keys:
             self.assertIn("plate", self.c["options"][k]["scopes"], k)
 
+    def test_driver_override_list_exception(self):
+        o = self.c["options"]
+        for k in ("initial_layer_print_height", "skirt_loops", "travel_speed"):
+            self.assertEqual(o[k]["scopes"], ["project", "plate", "object", "volume"], k)
+
     def test_demo_keys(self):
         o = self.c["options"]
         self.assertEqual((o["sparse_infill_density"]["type"], o["sparse_infill_density"]["min"],

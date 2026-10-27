@@ -5294,7 +5294,9 @@
       "nullable": false,
       "scopes": [
         "project",
-        "plate"
+        "plate",
+        "object",
+        "volume"
       ],
       "source_line": 3459,
       "type": "Float",
@@ -8878,7 +8880,9 @@
       "nullable": false,
       "scopes": [
         "project",
-        "plate"
+        "plate",
+        "object",
+        "volume"
       ],
       "source_line": 5419,
       "type": "Int"
@@ -10909,7 +10913,9 @@
       "nullable": true,
       "scopes": [
         "project",
-        "plate"
+        "plate",
+        "object",
+        "volume"
       ],
       "source_line": 6193,
       "type": "Floats",
