@@ -36,3 +36,28 @@ pub struct SearchArgs {
     /// Maximum number of hits (default 20, maximum 50).
     pub limit: Option<u32>,
 }
+
+/// One setting change of `studio_set_settings`.
+#[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Change {
+    /// Setting key, e.g. `sparse_infill_density` (see `catalog_search`).
+    pub key: String,
+    /// New value in natural form (number, string, bool or array).
+    pub value: serde_json::Value,
+    /// Defaults to `project`.
+    pub scope: Option<Scope>,
+    /// Needed for scope `plate` (`plate_id`) and `object` (`object_id`).
+    pub target: Option<TargetRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetSettingsArgs {
+    /// 1 to 100 changes, applied all-or-nothing as far as validation goes.
+    pub changes: Vec<Change>,
+    /// The `revision` from the last read; a mismatch returns 409 and writes nothing.
+    pub expected_revision: u64,
+    /// When true, validates and returns the diff without changing anything.
+    pub dry_run: Option<bool>,
+}

@@ -3,6 +3,7 @@
 //! `read`.
 
 pub mod args;
+mod mutate;
 mod read;
 
 use std::sync::Arc;
@@ -14,7 +15,7 @@ use crate::driver::{DriverClient, DriverError};
 use crate::errors::{ToolError, ToolErrorCode};
 use crate::revision::RevisionState;
 
-pub use args::{GetSettingsArgs, SearchArgs, TargetRef};
+pub use args::{Change, GetSettingsArgs, SearchArgs, SetSettingsArgs, TargetRef};
 
 #[derive(Debug, Clone)]
 pub struct ToolConfig {
@@ -32,6 +33,8 @@ pub struct Tools {
     pub(crate) probe: Arc<StatusProbe>,
     pub(crate) revision: Arc<RevisionState>,
     pub(crate) cfg: ToolConfig,
+    /// Serializes mutations (revision check + write + refresh).
+    pub(crate) write_lock: tokio::sync::Mutex<()>,
 }
 
 impl Tools {
@@ -65,6 +68,7 @@ impl Tools {
             probe,
             revision: Arc::new(RevisionState::new()),
             cfg,
+            write_lock: tokio::sync::Mutex::new(()),
         }
     }
 
