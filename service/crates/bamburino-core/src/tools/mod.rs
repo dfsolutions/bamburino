@@ -15,7 +15,11 @@ use crate::driver::{DriverClient, DriverError};
 use crate::errors::{ToolError, ToolErrorCode};
 use crate::revision::RevisionState;
 
-pub use args::{Change, GetSettingsArgs, SearchArgs, SetSettingsArgs, TargetRef};
+pub use args::{
+    Change, GetSettingsArgs, SearchArgs, SetSettingsArgs, SupportKind, SupportSettings,
+    SupportStyle, SupportTarget, SupportsArgs, TargetRef, Transform, TransformArgs, TransformMode,
+};
+pub use mutate::compose_rotation_deg;
 
 #[derive(Debug, Clone)]
 pub struct ToolConfig {
