@@ -3,5 +3,6 @@
 
 pub mod build_info;
 pub mod catalog;
+pub mod driver;
 pub mod errors;
 pub mod validate;

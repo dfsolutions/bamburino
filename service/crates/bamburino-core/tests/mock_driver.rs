@@ -1,0 +1,245 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+#![cfg(feature = "mock")]
+
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use bamburino_core::build_info;
+use bamburino_core::driver::mock::MockDriver;
+use bamburino_core::driver::{
+    DriverClient, DriverError, DriverTool, JobStatus, SettingSource, SettingsTarget,
+};
+
+fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+    pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
+#[test]
+fn driver_tool_allowlist_excludes_physical_and_global() {
+    let banned = [
+        "device_",
+        "printer_",
+        "calibration_",
+        "account_",
+        "ams_",
+        "project_",
+        "export_",
+        "history_",
+        "preferences_",
+    ];
+    for tool in DriverTool::ALL {
+        let name = tool.name();
+        for prefix in banned {
+            assert!(!name.starts_with(prefix), "{name} starts with {prefix}");
+        }
+        assert_ne!(name, "preset_select");
+    }
+}
+
+#[test]
+fn driver_tool_names_are_exact() {
+    assert_eq!(DriverTool::SettingsUpdate.name(), "settings_update");
+    assert_eq!(DriverTool::PreviewGetSummary.name(), "preview_get_summary");
+    assert!(DriverTool::SettingsUpdate.is_mutation());
+    assert!(!DriverTool::PlateList.is_mutation());
+}
+
+#[tokio::test]
+async fn mock_rejects_non_writable_key() {
+    let d = MockDriver::new();
+    let err = d
+        .settings_update(&map(&[("filament_type", "PLA")]))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DriverError::InvalidParams { .. }), "{err:?}");
+    // print_sequence is writable globally but not overridable.
+    d.settings_update(&map(&[("print_sequence", "by object")]))
+        .await
+        .unwrap();
+    let revision = d.plate_list().await.unwrap().plate_revision;
+    let err = d
+        .settings_override(
+            &SettingsTarget::Plate {
+                index: 0,
+                plate_revision: revision,
+            },
+            &map(&[("print_sequence", "by object")]),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DriverError::InvalidParams { .. }), "{err:?}");
+}
+
+#[tokio::test]
+async fn mock_plate_revision_changes_every_list() {
+    let d = MockDriver::new();
+    let a = d.plate_list().await.unwrap().plate_revision;
+    let b = d.plate_list().await.unwrap().plate_revision;
+    assert_ne!(a, b);
+}
+
+#[tokio::test]
+async fn mock_slice_start_rejects_unissued_and_outdated_revisions() {
+    let d = MockDriver::new();
+    let err = d.slice_start(0, "bogus").await.unwrap_err();
+    assert!(matches!(err, DriverError::StaleReference { .. }), "{err:?}");
+
+    let old = d.plate_list().await.unwrap().plate_revision;
+    d.settings_update(&map(&[("layer_height", "0.16")]))
+        .await
+        .unwrap();
+    let err = d.slice_start(0, &old).await.unwrap_err();
+    assert!(matches!(err, DriverError::StaleReference { .. }), "{err:?}");
+
+    let fresh = d.plate_list().await.unwrap().plate_revision;
+    d.slice_start(0, &fresh).await.unwrap();
+}
+
+#[tokio::test]
+async fn mock_slice_job_reaches_succeeded_in_two_polls() {
+    let d = MockDriver::new();
+    let rev = d.plate_list().await.unwrap().plate_revision;
+    let job = d.slice_start(0, &rev).await.unwrap();
+    assert_eq!(job.status, JobStatus::Running);
+    assert!(d.app_state().await.unwrap().slicing_running);
+
+    let first = d.job_get(&job.id).await.unwrap();
+    assert_eq!(first.status, JobStatus::Running);
+    assert_eq!(first.progress_percent, Some(50));
+    assert_eq!(first.slice_result_id, None);
+
+    let second = d.job_get(&job.id).await.unwrap();
+    assert_eq!(second.status, JobStatus::Succeeded);
+    assert_eq!(second.progress_percent, Some(100));
+    let result_id = second.slice_result_id.expect("slice result id");
+    assert!(!d.app_state().await.unwrap().slicing_running);
+
+    let state = d.slice_state().await.unwrap();
+    assert!(state.valid);
+    assert_eq!(state.slice_result_id.as_deref(), Some(result_id.as_str()));
+
+    let rev = d.plate_list().await.unwrap().plate_revision;
+    let summary = d.preview_summary(0, &rev, &result_id).await.unwrap();
+    assert!(summary.print_time_s.is_some());
+}
+
+#[tokio::test]
+async fn mock_user_undo_restores_previous_values() {
+    let d = MockDriver::new();
+    let before = d.app_state().await.unwrap().undo_snapshot;
+    d.settings_update(&map(&[("layer_height", "0.12")]))
+        .await
+        .unwrap();
+    let after_update = d.app_state().await.unwrap().undo_snapshot;
+    assert_ne!(before, after_update);
+    d.user_edit("layer_height", "0.3");
+    d.user_undo();
+
+    let eff = d
+        .settings_effective(
+            &SettingsTarget::Project,
+            Some(&["layer_height".to_string()]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(eff.len(), 1);
+    assert_eq!(eff[0].value, "0.12");
+    assert_eq!(eff[0].source, SettingSource::Project);
+    assert_ne!(d.app_state().await.unwrap().undo_snapshot, after_update);
+}
+
+#[tokio::test]
+async fn mock_modal_blocks_mutations_but_not_reads() {
+    let d = MockDriver::new();
+    d.set_modal(true);
+    assert!(d.app_state().await.unwrap().modal_open);
+    let err = d
+        .settings_update(&map(&[("layer_height", "0.2")]))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DriverError::Busy { .. }), "{err:?}");
+    d.set_modal(false);
+    d.settings_update(&map(&[("layer_height", "0.2")]))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn mock_fail_next_unreachable_and_calls_are_recorded() {
+    let d = MockDriver::new();
+    d.fail_next(DriverError::Timeout { after_ms: 30_000 });
+    assert_eq!(
+        d.app_state().await.unwrap_err(),
+        DriverError::Timeout { after_ms: 30_000 }
+    );
+    d.app_state().await.unwrap();
+
+    d.set_unreachable(true);
+    assert_eq!(d.plate_list().await.unwrap_err(), DriverError::Unreachable);
+    d.set_unreachable(false);
+
+    d.delay_next(Duration::from_millis(20));
+    let t = std::time::Instant::now();
+    d.model_list().await.unwrap();
+    assert!(t.elapsed() >= Duration::from_millis(20));
+
+    assert_eq!(
+        d.calls(),
+        vec!["app_get_state", "app_get_state", "plate_list", "model_list"]
+    );
+}
+
+#[tokio::test]
+async fn mock_capabilities_identity_is_overridable() {
+    let d = MockDriver::new();
+    let caps = d.capabilities().await.unwrap();
+    assert_eq!(caps.app_version, build_info::STUDIO_VERSION);
+    assert_eq!(caps.patch_id.as_deref(), build_info::EXPECTED_PATCH_ID);
+    d.set_identity("01.00.00.00", "other-patch");
+    let caps = d.capabilities().await.unwrap();
+    assert_eq!(caps.app_version, "01.00.00.00");
+    assert_eq!(caps.patch_id.as_deref(), Some("other-patch"));
+}
+
+#[tokio::test]
+async fn mock_object_transform_updates_instance() {
+    let d = MockDriver::new();
+    let objs = d.model_list().await.unwrap();
+    assert_eq!(objs[0].id, "obj-1");
+    assert_eq!(objs[0].dimensions_mm, [20.0, 20.0, 20.0]);
+    let t = bamburino_core::driver::AbsoluteTransform {
+        position_mm: [10.0, 20.0, 0.0],
+        rotation_deg: [0.0, 0.0, 45.0],
+        scale: [2.0, 2.0, 2.0],
+    };
+    let o = d.object_transform("obj-1", "inst-1", &t).await.unwrap();
+    assert_eq!(o.instances[0].position_mm, [10.0, 20.0, 0.0]);
+    assert_eq!(o.dimensions_mm, [40.0, 40.0, 40.0]);
+    let err = d.object_transform("nope", "inst-1", &t).await.unwrap_err();
+    assert!(matches!(err, DriverError::StaleReference { .. }), "{err:?}");
+}
+
+#[tokio::test]
+async fn mock_plate_select_is_a_mutation_and_invalidates_revisions() {
+    assert!(DriverTool::PlateSelect.is_mutation());
+    let d = MockDriver::new();
+    let rev = d.plate_list().await.unwrap().plate_revision;
+    d.plate_select(0, &rev).await.unwrap();
+    let err = d.plate_select(0, &rev).await.unwrap_err();
+    assert!(matches!(err, DriverError::StaleReference { .. }), "{err:?}");
+}
+
+#[tokio::test]
+async fn mock_object_transform_requires_known_instance() {
+    let d = MockDriver::new();
+    let t = bamburino_core::driver::AbsoluteTransform {
+        position_mm: [0.0; 3],
+        rotation_deg: [0.0; 3],
+        scale: [1.0; 3],
+    };
+    let err = d.object_transform("obj-1", "inst-9", &t).await.unwrap_err();
+    assert!(matches!(err, DriverError::StaleReference { .. }), "{err:?}");
+}

@@ -12,3 +12,6 @@ path = "src/main.rs"
 
 [dependencies]
 bamburino-core = { path = "../bamburino-core" }
+
+[dev-dependencies]
+bamburino-core = { path = "../bamburino-core", features = ["mock"] }
