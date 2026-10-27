@@ -104,7 +104,10 @@ impl Tools {
 /// Maps a driver failure that happened after Studio was found ready.
 pub(crate) fn driver_error(e: DriverError) -> ToolError {
     match e {
-        DriverError::Busy { message } => ToolError::new(ToolErrorCode::Busy, message),
+        DriverError::Busy { message } => {
+            tracing::warn!("driver busy");
+            ToolError::new(ToolErrorCode::Busy, message)
+        }
         DriverError::Unauthorized => ToolError::new(
             ToolErrorCode::DriverUnauthorized,
             "Run: bamburino.exe config set-driver-token",

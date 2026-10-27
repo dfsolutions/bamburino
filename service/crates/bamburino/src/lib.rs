@@ -3,4 +3,5 @@
 
 pub mod acl;
 pub mod config;
+pub mod logging;
 pub mod secrets;

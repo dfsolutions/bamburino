@@ -146,17 +146,27 @@ pub(crate) fn read_error(e: DriverError) -> ToolError {
 /// unknown: the write may still complete in Studio.
 pub(crate) fn write_error(e: DriverError) -> ToolError {
     match e {
-        DriverError::Timeout { after_ms } => ToolError::new(
-            ToolErrorCode::Busy,
-            format!(
-                "Bambu Studio did not answer within {after_ms} ms; the change may or may not have been applied. Read the state again before retrying."
-            ),
-        )
-        .with_details(json!({ "reason": "driver_timeout", "outcome": "unknown" })),
-        DriverError::Busy { message } => ToolError::new(ToolErrorCode::Busy, message)
-            .with_details(json!({ "reason": "driver_busy" })),
+        DriverError::Timeout { after_ms } => {
+            tracing::warn!(after_ms, "driver write timed out, outcome unknown");
+            write_timeout(after_ms)
+        }
+        DriverError::Busy { message } => {
+            tracing::warn!("driver busy on write");
+            ToolError::new(ToolErrorCode::Busy, message)
+                .with_details(json!({ "reason": "driver_busy" }))
+        }
         other => read_error(other),
     }
+}
+
+fn write_timeout(after_ms: u64) -> ToolError {
+    ToolError::new(
+        ToolErrorCode::Busy,
+        format!(
+            "Bambu Studio did not answer within {after_ms} ms; the change may or may not have been applied. Read the state again before retrying."
+        ),
+    )
+    .with_details(json!({ "reason": "driver_timeout", "outcome": "unknown" }))
 }
 
 /// Whether `undo_snapshot` moved the way `n` successful snapshotting calls

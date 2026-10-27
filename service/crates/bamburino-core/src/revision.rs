@@ -207,7 +207,8 @@ impl RevisionState {
                 *last = None;
             }
             Err(e) => {
-                self.poll_errors.fetch_add(1, Ordering::Relaxed);
+                let n = self.poll_errors.fetch_add(1, Ordering::Relaxed) + 1;
+                tracing::warn!(poll_errors = n, error = %e, "revision poll failed");
                 *last = Some(e.to_string());
             }
         }
