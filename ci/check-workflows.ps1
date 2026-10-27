@@ -164,7 +164,11 @@ function Test-Workflow([IO.FileInfo]$f) {
             if ((Get-Indent $l) -eq $jobInd) {
                 if ($l -match '^\s*([\w-]+):\s*$') {
                     $cur = $Matches[1]
+                    if ($jobs.Contains($cur)) {
+                        Add-V $name 'g' "duplicate job id '$cur' (line $($j + 1)): unsupported form"
+                    } else {
                     $jobs[$cur] = @{ Lines = (New-Object System.Collections.Generic.List[string]); Idx = (New-Object System.Collections.Generic.List[int]) }
+                    }
                     continue
                 } else {
                     $cur = $null

@@ -56,7 +56,7 @@ $expect = [ordered]@{
     'bad-workflow-run.yml' = 'a'; 'bad-guard-continue-on-error.yml' = 'c'; 'bad-guard-no-F.yml' = 'c'
     'bad-flow-uses.yml' = 'g'
     'bad-if-space.yml' = 'c'; 'bad-perm-space.yml' = 'd'; 'bad-guard-heredoc.yml' = 'c'
-    'bad-flow-escape.yml' = 'g'; 'bad-duplicate-on.yml' = 'g'; 'bad-multidoc.yml' = 'g'; 'bad-guard-case.yml' = 'c'
+    'bad-flow-escape.yml' = 'g'; 'bad-duplicate-on.yml' = 'g'; 'bad-multidoc.yml' = 'g'; 'bad-guard-case.yml' = 'c'; 'bad-duplicate-job.yml' = 'g'
 }
 Assert-True ($r.Out -match 'bad-flow-escape\.yml.*evil/x@v1') 'bad-flow-escape.yml: hidden unpinned uses is detected'
 Assert-True ($r.Out -match 'bad-duplicate-on\.yml.*duplicate top-level key .on.') 'bad-duplicate-on.yml: duplicate on reported'
