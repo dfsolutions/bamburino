@@ -43,6 +43,7 @@ name = "bamburino"
 version = "0.1.0"
 dependencies = [
  "bamburino-core",
+ "windows-sys",
 ]
 
 [[package]]

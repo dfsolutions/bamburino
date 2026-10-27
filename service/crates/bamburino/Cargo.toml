@@ -15,3 +15,6 @@ bamburino-core = { path = "../bamburino-core" }
 
 [dev-dependencies]
 bamburino-core = { path = "../bamburino-core", features = ["mock"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
