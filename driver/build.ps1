@@ -6,11 +6,20 @@
                  HEAD == studio.tag_commit. If the folder already exists, is clean and sits on that commit,
                  nothing is done. If it exists but is dirty (tracked or untracked changes), exits 20 without
                  touching it. If it exists clean but on another commit or is not a git work tree, exits 21.
-    Exit codes: 0 ok, 20 clone dirty, 21 clone at an unexpected state, 1 any other error.
+    -Step patch  Recomputes patch_id (driver/patch-id.ps1); if it differs from driver.patch_id in upstream.toml,
+                 exits 21 without touching the clone. Otherwise resets the clone to studio.tag_commit
+                 (git checkout -f + git clean -fdx, keeping /deps/build and /build), then applies every
+                 driver/patches/*.diff in ordinal name order (git apply --check, then git apply; both with
+                 --index so new files are tracked and 'git diff <tag_commit>' sees the whole patch set).
+                 If a --check fails, exits 20 and writes the failing file and its rejected hunks
+                 (git apply --reject on a temporary copy of the touched files) to the step log.
+                 Idempotent: every run starts again from the reset tree.
+    Exit codes: 0 ok; 20 clone dirty (fetch) or patch does not apply (patch);
+                21 clone at an unexpected state (fetch, patch) or patch_id mismatch (patch); 1 any other error.
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('fetch')][string]$Step
+    [Parameter(Mandatory)][ValidateSet('fetch', 'patch')][string]$Step
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -23,6 +32,15 @@ function Invoke-Git {
     return $out
 }
 
+function Test-CloneRoot {
+    # True when $Path is the top of its own git work tree, not a plain folder inside another repository.
+    param([Parameter(Mandatory)][string]$Path)
+    $top = & git -C $Path rev-parse --show-toplevel 2>$null
+    $full = [System.IO.Path]::GetFullPath($Path).TrimEnd([char]92, [char]47)
+    $topFull = if ($LASTEXITCODE -eq 0 -and $top) { [System.IO.Path]::GetFullPath(($top | Select-Object -First 1).Trim()).TrimEnd([char]92, [char]47) } else { '' }
+    return ($topFull -ieq $full)
+}
+
 function Invoke-Fetch {
     $u = Get-Upstream
     $repo = $u['studio.repo']; $tag = $u['studio.tag']; $want = $u['studio.tag_commit']
@@ -31,11 +49,7 @@ function Invoke-Fetch {
     $url = "https://github.com/$repo.git"
 
     if (Test-Path -LiteralPath $src) {
-        # The folder must be the top of its own work tree, not a plain folder inside another repository.
-        $top = & git -C $src rev-parse --show-toplevel 2>$null
-        $srcFull = [System.IO.Path]::GetFullPath($src).TrimEnd([char]92, [char]47)
-        $topFull = if ($LASTEXITCODE -eq 0 -and $top) { [System.IO.Path]::GetFullPath(($top | Select-Object -First 1).Trim()).TrimEnd([char]92, [char]47) } else { '' }
-        if ($topFull -ine $srcFull) {
+        if (-not (Test-CloneRoot $src)) {
             Write-Host "ERROR $src exists but is not the root of a git work tree (partial or failed clone?). Delete the folder and rerun -Step fetch."
             exit 21
         }
@@ -58,7 +72,109 @@ function Invoke-Fetch {
     Write-Host "OK fetch: $src at $want"
 }
 
+function Get-PatchFiles {
+    # driver/patches/*.diff in ordinal (byte-wise) name order: the same order patch-id.ps1 hashes them in.
+    $dir = Join-Path $PSScriptRoot 'patches'
+    $byName = @{}
+    foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter '*.diff' -File)) { $byName[$f.Name] = $f.FullName }
+    $names = [string[]]@($byName.Keys)
+    [Array]::Sort($names, [StringComparer]::Ordinal)
+    return @($names | ForEach-Object { $byName[$_] })
+}
+
+function Add-Log {
+    param([Parameter(Mandatory)][string]$Log, $Lines)
+    $text = @($Lines | Where-Object { $null -ne $_ } | ForEach-Object { "$_" })
+    if ($text.Count -gt 0) { Add-Content -LiteralPath $Log -Value $text }
+}
+
+function Write-RejectReport {
+    # Applies $Diff with --reject to a temporary copy of the files it touches and appends the rejected hunks to $Log.
+    param([Parameter(Mandatory)][string]$Src, [Parameter(Mandatory)][string]$Diff, [Parameter(Mandatory)][string]$Log)
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('bamburino-reject-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp | Out-Null
+    try {
+        foreach ($line in [System.IO.File]::ReadLines($Diff)) {
+            if ($line -match '^diff --git a/(\S+) b/') {
+                $from = Join-Path $Src $Matches[1]
+                if (Test-Path -LiteralPath $from -PathType Leaf) {
+                    $to = Join-Path $tmp $Matches[1]
+                    New-Item -ItemType Directory -Force -Path (Split-Path $to -Parent) | Out-Null
+                    Copy-Item -LiteralPath $from -Destination $to
+                }
+            }
+        }
+        # Make the copy its own repository root, so git apply does not resolve paths against an enclosing repo.
+        & git -C $tmp init -q 2>&1 | Out-Null
+        $out = & git -C $tmp apply --reject --whitespace=nowarn $Diff 2>&1
+        Add-Log $Log "== git apply --reject $([System.IO.Path]::GetFileName($Diff)) (temporary copy) exit $LASTEXITCODE"
+        Add-Log $Log $out
+        $rejects = @(Get-ChildItem -LiteralPath $tmp -Recurse -File -Filter '*.rej' | Sort-Object FullName)
+        foreach ($r in $rejects) {
+            $rel = ($r.FullName.Substring($tmp.Length + 1) -replace '\\', '/') -replace '\.rej$', ''
+            $hunks = @(Select-String -LiteralPath $r.FullName -Pattern '^@@ ').Count
+            Add-Log $Log "== REJECTED $rel ($hunks hunk(s))"
+            Add-Log $Log ([System.IO.File]::ReadAllLines($r.FullName))
+            Write-Host "  rejected: $rel ($hunks hunk(s))"
+        }
+        if ($rejects.Count -eq 0) { Write-Host '  no .rej produced (failure is not hunk-level, e.g. a missing or already existing file); see log' }
+    } finally {
+        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-Patch {
+    $u = Get-Upstream
+    $want = $u['studio.tag_commit']; $pinned = $u['driver.patch_id']
+    if ($want -notmatch '^[0-9a-f]{40}$') { throw 'upstream.toml: studio.tag_commit not set' }
+    $actual = ([string](& (Join-Path $PSScriptRoot 'patch-id.ps1') | Select-Object -Last 1)).Trim()
+    if ($actual -ne $pinned) {
+        Write-Host "ERROR patch_id mismatch: driver/patches hash to $actual, upstream.toml driver.patch_id is '$pinned'. Clone not touched. Run driver/patch-id.ps1 -Write only if the patch change is intended."
+        exit 21
+    }
+
+    $src = Join-Path (Get-BuildRoot) 'BambuStudio'
+    if (-not (Test-Path -LiteralPath $src) -or -not (Test-CloneRoot $src)) {
+        Write-Host "ERROR $src is missing or not the root of a git work tree. Run driver/build.ps1 -Step fetch first."
+        exit 21
+    }
+    & git -C $src cat-file -e "$want^{commit}" 2>$null
+    if ($LASTEXITCODE -ne 0) { Write-Host "ERROR $src does not contain commit $want. Delete it and rerun -Step fetch."; exit 21 }
+
+    $log = Write-StepLog -Step 'patch'
+    Write-Host "Resetting $src to $want; log: $log"
+    Invoke-Git -C $src checkout --quiet --force --detach $want | Out-Null
+    Invoke-Git -C $src clean --quiet -fdx --exclude=/deps/build --exclude=/build | Out-Null
+    $left = Invoke-Git -C $src status --porcelain --untracked-files=all
+    if ($left) { throw "reset of $src left changes behind: $($left -join '; ')" }
+    $head = (Invoke-Git -C $src rev-parse HEAD | Select-Object -First 1).Trim()
+    if ($head -ne $want) { throw "after checkout HEAD is $head, expected $want" }
+
+    $patches = @(Get-PatchFiles)
+    if ($patches.Count -eq 0) { throw 'no driver/patches/*.diff to apply' }
+    foreach ($p in $patches) {
+        $name = [System.IO.Path]::GetFileName($p)
+        $out = & git -C $src apply --check --index --whitespace=nowarn $p 2>&1
+        $code = $LASTEXITCODE
+        Add-Log $log "== git apply --check $name exit $code"
+        Add-Log $log $out
+        if ($code -ne 0) {
+            Write-Host "PATCH FAILED $name does not apply on $want; rejected hunks in $log"
+            Write-RejectReport -Src $src -Diff $p -Log $log
+            exit 20
+        }
+        $out = & git -C $src apply --index --whitespace=nowarn $p 2>&1
+        $code = $LASTEXITCODE
+        Add-Log $log "== git apply $name exit $code"
+        Add-Log $log $out
+        if ($code -ne 0) { throw "git apply $name failed after a passing --check (exit $code), see $log" }
+        Write-Host "applied $name"
+    }
+    Write-Host "OK patch: $($patches.Count) patch(es) applied on $want (patch_id $actual)"
+}
+
 switch ($Step) {
     'fetch' { Invoke-Fetch }
+    'patch' { Invoke-Patch }
 }
 exit 0
