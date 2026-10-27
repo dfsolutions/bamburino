@@ -1,0 +1,15 @@
+# Single source of truth for the pinned upstream and the driver patch set.
+[studio]
+repo = "bambulab/BambuStudio"
+tag = "v02.08.04.57"
+tag_commit = "f977235e6d736c4c0b650520ac5a5b72cbfe9244"
+version = "02.08.04.57"
+
+[driver]
+pr = 12485
+pr_repo = "otarkhan/BambuStudio"
+pr_head = "c31e97108e4d1ea137f90a075502e4d4536535fe"
+pr_base = "da8b44ee34dd349f2ae0df3f1cbae366df482354"
+patch_id = ""
+build_suffix_prefix = "bamburino"
+port = 27183
