@@ -35,8 +35,9 @@ pub struct OptionDef {
     pub max: Option<f64>,
     pub readonly: bool,
     pub enum_values: Vec<String>,
-    /// Number, bool, list, or a string such as `"400%"`; absent when the
-    /// catalog only carries a `default_expression`.
+    /// Number, bool, list, or a string such as `"400%"`. `None` when the
+    /// catalog only carries a `default_expression`; JSON `null` and an absent
+    /// field both map to `None`.
     pub default: Option<serde_json::Value>,
     /// True when the catalog marks the option as out of scope (`excluded_reason`).
     pub excluded: bool,
@@ -232,10 +233,15 @@ impl Catalog {
         self.options.get(key)
     }
 
-    /// Case-insensitive search: every whitespace-separated token must match
-    /// the key, label, description or an enum value (key/label weigh most).
+    /// Case-insensitive search: every whitespace- or underscore-separated token
+    /// must match the key, label, description or an enum value (key/label weigh
+    /// most). Excluded options (out of the service's scope) are never returned.
+    /// Real match weights move the score in steps of at least 0.5; the
+    /// description-length tie-break is capped at 0.09 and can never reorder
+    /// results that differ in real weight.
     pub fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
-        let q = query.to_lowercase();
+        // Keys are matched with `_` as a space, so queries get the same treatment.
+        let q = query.to_lowercase().replace('_', " ");
         let tokens: Vec<&str> = q.split_whitespace().collect();
         if tokens.is_empty() || limit == 0 {
             return Vec::new();
@@ -244,6 +250,7 @@ impl Catalog {
         let mut hits: Vec<SearchHit> = self
             .options
             .values()
+            .filter(|o| !o.excluded)
             .filter_map(|o| {
                 let key = o.key.to_lowercase().replace('_', " ");
                 let label = o.label.to_lowercase();
@@ -280,7 +287,7 @@ impl Catalog {
                 }
                 // Tie-break: a short description means the option is the
                 // primary subject of the match, not an incidental mention.
-                score -= (desc.len() as f64 / 1000.0).min(0.9);
+                score -= (desc.chars().count() as f64 / 10_000.0).min(0.09);
                 Some(SearchHit {
                     key: o.key.clone(),
                     label: o.label.clone(),
@@ -296,7 +303,8 @@ impl Catalog {
         hits
     }
 
-    /// Up to `n` keys closest to `unknown` (Jaro-Winkler >= 0.75 on key or label).
+    /// Up to `n` keys closest to `unknown` (Jaro-Winkler >= 0.75 on key or
+    /// label). Excluded options are never suggested.
     pub fn suggest(&self, unknown: &str, n: usize) -> Vec<String> {
         const THRESHOLD: f64 = 0.75;
         let u = unknown.trim().to_lowercase();
@@ -306,6 +314,7 @@ impl Catalog {
         let mut scored: Vec<(f64, &str)> = self
             .options
             .values()
+            .filter(|o| !o.excluded)
             .filter_map(|o| {
                 let by_key = strsim::jaro_winkler(&u, &o.key.to_lowercase());
                 let by_label = strsim::jaro_winkler(&u, &o.label.to_lowercase());
