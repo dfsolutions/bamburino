@@ -31,8 +31,14 @@ function Invoke-Fetch {
     $url = "https://github.com/$repo.git"
 
     if (Test-Path -LiteralPath $src) {
-        $null = & git -C $src rev-parse --is-inside-work-tree 2>&1
-        if ($LASTEXITCODE -ne 0) { Write-Host "ERROR $src exists but is not a git work tree"; exit 21 }
+        # The folder must be the top of its own work tree, not a plain folder inside another repository.
+        $top = & git -C $src rev-parse --show-toplevel 2>$null
+        $srcFull = [System.IO.Path]::GetFullPath($src).TrimEnd([char]92, [char]47)
+        $topFull = if ($LASTEXITCODE -eq 0 -and $top) { [System.IO.Path]::GetFullPath(($top | Select-Object -First 1).Trim()).TrimEnd([char]92, [char]47) } else { '' }
+        if ($topFull -ine $srcFull) {
+            Write-Host "ERROR $src exists but is not the root of a git work tree (partial or failed clone?). Delete the folder and rerun -Step fetch."
+            exit 21
+        }
         $dirty = Invoke-Git -C $src status --porcelain --untracked-files=normal
         if ($dirty) { Write-Host "DIRTY $src has local changes; not touching it"; exit 20 }
         $head = (Invoke-Git -C $src rev-parse HEAD | Select-Object -First 1).Trim()
@@ -45,10 +51,10 @@ function Invoke-Fetch {
     $log = Write-StepLog -Step 'fetch'
     Write-Host "Cloning $url ($tag) into $src; log: $log"
     & git -c core.longpaths=true clone --depth 1 --branch $tag $url $src *> $log
-    if ($LASTEXITCODE -ne 0) { throw "git clone failed (exit $LASTEXITCODE), see $log" }
+    if ($LASTEXITCODE -ne 0) { throw "git clone failed (exit $LASTEXITCODE), see $log. If $src was left behind, delete it before rerunning -Step fetch." }
     Invoke-Git -C $src config core.longpaths true | Out-Null
     $head = (Invoke-Git -C $src rev-parse HEAD | Select-Object -First 1).Trim()
-    if ($head -ne $want) { throw "cloned $tag but HEAD is $head, expected $want (tag moved?)" }
+    if ($head -ne $want) { throw "cloned $tag but HEAD is $head, expected $want (tag moved?). Delete $src before rerunning." }
     Write-Host "OK fetch: $src at $want"
 }
 
