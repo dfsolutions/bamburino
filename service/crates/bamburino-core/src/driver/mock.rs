@@ -18,6 +18,9 @@ use super::{
     DriverJob, DriverJobError, DriverTool, EffectiveSetting, FilamentUsage, Instance, JobStatus,
     ModelObject, Plate, PlateList, SettingSource, SettingsTarget, SliceState, SliceSummary,
 };
+use super::{
+    AmsInventory, DeviceSummary, ExportedPlate, FilamentAssignment, PlateContents, PlateDeleted,
+};
 use crate::build_info;
 use crate::catalog::{Catalog, OptionKind};
 
@@ -818,6 +821,85 @@ impl DriverClient for MockDriver {
             error: None,
             slice_result_id: Some(slice_result_id.to_string()),
             reused: false,
+        })
+    }
+    // TODO(task-2): replace with the real mock model.
+    async fn plate_create(&self) -> Result<PlateList, DriverError> {
+        Err(DriverError::Protocol {
+            message: "not modelled by the mock yet".into(),
+        })
+    }
+    // TODO(task-2): replace with the real mock model.
+    async fn plate_rename(&self, _i: u32, _r: &str, _n: &str) -> Result<PlateList, DriverError> {
+        Err(DriverError::Protocol {
+            message: "not modelled by the mock yet".into(),
+        })
+    }
+    // TODO(task-2): replace with the real mock model.
+    async fn plate_delete(
+        &self,
+        _i: u32,
+        _r: &str,
+        _c: PlateContents,
+        _t: Option<u32>,
+    ) -> Result<PlateDeleted, DriverError> {
+        Err(DriverError::Protocol {
+            message: "not modelled by the mock yet".into(),
+        })
+    }
+    // TODO(task-2): replace with the real mock model.
+    async fn plate_move_instance(
+        &self,
+        _o: &str,
+        _n: &str,
+        _i: u32,
+        _r: &str,
+    ) -> Result<PlateList, DriverError> {
+        Err(DriverError::Protocol {
+            message: "not modelled by the mock yet".into(),
+        })
+    }
+    // TODO(task-2): replace with the real mock model.
+    async fn filament_assign(&self, _o: &str, _i: u32) -> Result<FilamentAssignment, DriverError> {
+        Err(DriverError::Protocol {
+            message: "not modelled by the mock yet".into(),
+        })
+    }
+    // TODO(task-2): replace with the real mock model.
+    async fn arrange_start(&self) -> Result<DriverJob, DriverError> {
+        Err(DriverError::Protocol {
+            message: "not modelled by the mock yet".into(),
+        })
+    }
+    // TODO(task-2): replace with the real mock model.
+    async fn device_list(&self) -> Result<Vec<DeviceSummary>, DriverError> {
+        Err(DriverError::Protocol {
+            message: "not modelled by the mock yet".into(),
+        })
+    }
+    // TODO(task-2): replace with the real mock model.
+    async fn ams_inventory(&self, _d: &str) -> Result<AmsInventory, DriverError> {
+        Err(DriverError::Protocol {
+            message: "not modelled by the mock yet".into(),
+        })
+    }
+    // TODO(task-2): replace with the real mock model.
+    async fn project_save(&self, _p: &std::path::Path, _o: bool) -> Result<(), DriverError> {
+        Err(DriverError::Protocol {
+            message: "not modelled by the mock yet".into(),
+        })
+    }
+    // TODO(task-2): replace with the real mock model.
+    async fn export_sliced_3mf(
+        &self,
+        _i: u32,
+        _r: &str,
+        _s: &str,
+        _p: &std::path::Path,
+        _o: bool,
+    ) -> Result<ExportedPlate, DriverError> {
+        Err(DriverError::Protocol {
+            message: "not modelled by the mock yet".into(),
         })
     }
 }

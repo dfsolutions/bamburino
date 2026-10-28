@@ -27,9 +27,11 @@ use serde_json::{Map, Value, json};
 use tokio::sync::Mutex;
 
 use super::{
-    AbsoluteTransform, ActivePresets, AppState, DriverCapabilities, DriverClient, DriverError,
-    DriverJob, DriverJobError, DriverTool, EffectiveSetting, Instance, JobStatus, ModelObject,
-    Plate, PlateList, SettingSource, SettingsTarget, SliceState, SliceSummary,
+    AbsoluteTransform, ActivePresets, AmsInventory, AmsTray, AmsUnit, AppState, DeviceSummary,
+    DriverCapabilities, DriverClient, DriverError, DriverJob, DriverJobError, DriverTool,
+    EffectiveSetting, ExportedPlate, FilamentAssignment, Instance, JobStatus, ModelObject, Plate,
+    PlateContents, PlateDeleted, PlateList, SettingSource, SettingsTarget, SliceState,
+    SliceSummary,
 };
 use crate::build_info::BAMBURINO_VERSION;
 
@@ -516,6 +518,40 @@ fn parse_plate_list(v: &Value) -> Result<PlateList, DriverError> {
     })
 }
 
+fn utf8_path<'a>(path: &'a std::path::Path, what: &str) -> Result<&'a str, DriverError> {
+    path.to_str().ok_or_else(|| DriverError::InvalidParams {
+        message: format!("{what} path is not valid UTF-8"),
+    })
+}
+
+fn parse_ams_inventory(v: &Value) -> Result<AmsInventory, DriverError> {
+    let units = array_of(v, "units")?
+        .iter()
+        .map(|u| {
+            let trays = array_of(u, "slots")?
+                .iter()
+                .map(|t| {
+                    Ok(AmsTray {
+                        slot_id: str_of(t, "slotId")?,
+                        exists: bool_of(t, "exists")?,
+                        filament_type: opt_str(t, "filamentType").unwrap_or_default(),
+                        color: opt_str(t, "color").unwrap_or_default(),
+                        remaining_percent: t
+                            .get("remainingPercent")
+                            .and_then(Value::as_i64)
+                            .and_then(|n| i32::try_from(n).ok()),
+                    })
+                })
+                .collect::<Result<Vec<_>, DriverError>>()?;
+            Ok(AmsUnit {
+                ams_id: str_of(u, "amsId")?,
+                trays,
+            })
+        })
+        .collect::<Result<Vec<_>, DriverError>>()?;
+    Ok(AmsInventory { units })
+}
+
 fn parse_object(o: &Value) -> Result<ModelObject, DriverError> {
     let instances = array_of(o, "instances")?
         .iter()
@@ -559,13 +595,18 @@ fn parse_job_status(s: &str) -> JobStatus {
 }
 
 fn parse_job(v: &Value) -> Result<DriverJob, DriverError> {
-    let error = v
-        .get("error")
-        .filter(|e| e.is_object())
-        .map(|e| DriverJobError {
+    let error = match v.get("error") {
+        Some(e) if e.is_object() => Some(DriverJobError {
             code: opt_str(e, "code").unwrap_or_default(),
             message: opt_str(e, "message").unwrap_or_default(),
-        });
+        }),
+        // UI jobs (arrange) report a plain string.
+        Some(Value::String(m)) if !m.is_empty() => Some(DriverJobError {
+            code: "NATIVE_ERROR".to_string(),
+            message: m.clone(),
+        }),
+        _ => None,
+    };
     let result = v.get("result").filter(|r| r.is_object());
     Ok(DriverJob {
         id: str_of(v, "jobId")?,
@@ -897,6 +938,150 @@ impl DriverClient for HttpDriverClient {
             "overwrite": false,
         });
         parse_job(&self.call(DriverTool::ExportGcode, args).await?)
+    }
+
+    async fn plate_create(&self) -> Result<PlateList, DriverError> {
+        parse_plate_list(&self.call(DriverTool::PlateCreate, json!({})).await?)
+    }
+
+    async fn plate_rename(
+        &self,
+        plate_index: u32,
+        plate_revision: &str,
+        name: &str,
+    ) -> Result<PlateList, DriverError> {
+        let args = json!({
+            "plateIndex": plate_index,
+            "expectedPlateRevision": plate_revision,
+            "name": name,
+        });
+        parse_plate_list(&self.call(DriverTool::PlateRename, args).await?)
+    }
+
+    async fn plate_delete(
+        &self,
+        plate_index: u32,
+        plate_revision: &str,
+        contents: PlateContents,
+        target_plate_index: Option<u32>,
+    ) -> Result<PlateDeleted, DriverError> {
+        let mut args = Map::new();
+        args.insert("plateIndex".into(), json!(plate_index));
+        args.insert("expectedPlateRevision".into(), json!(plate_revision));
+        args.insert("contents".into(), json!(contents.wire()));
+        if let Some(t) = target_plate_index {
+            args.insert("targetPlateIndex".into(), json!(t));
+        }
+        let v = self
+            .call(DriverTool::PlateDelete, Value::Object(args))
+            .await?;
+        Ok(PlateDeleted {
+            plates: parse_plate_list(&v)?,
+            moved_instances: u32_of(&v, "movedInstanceCount")?,
+            deleted_objects: u32_of(&v, "deletedObjectCount")?,
+            destination_plate_index: v
+                .get("destinationPlateIndex")
+                .and_then(Value::as_u64)
+                .and_then(|n| u32::try_from(n).ok()),
+        })
+    }
+
+    async fn plate_move_instance(
+        &self,
+        object_id: &str,
+        instance_id: &str,
+        plate_index: u32,
+        plate_revision: &str,
+    ) -> Result<PlateList, DriverError> {
+        let args = json!({
+            "objectId": object_id,
+            "instanceId": instance_id,
+            "plateIndex": plate_index,
+            "expectedPlateRevision": plate_revision,
+        });
+        parse_plate_list(&self.call(DriverTool::PlateMoveInstance, args).await?)
+    }
+
+    async fn filament_assign(
+        &self,
+        object_id: &str,
+        filament_index: u32,
+    ) -> Result<FilamentAssignment, DriverError> {
+        let args = json!({"objectId": object_id, "filamentIndex": filament_index});
+        let v = self.call(DriverTool::FilamentAssign, args).await?;
+        Ok(FilamentAssignment {
+            object_id: str_of(field(&v, "target")?, "objectId")?,
+            filament_index: u32_of(&v, "filamentIndex")?,
+            preset: str_of(&v, "preset")?,
+        })
+    }
+
+    async fn arrange_start(&self) -> Result<DriverJob, DriverError> {
+        parse_job(&self.call(DriverTool::ArrangeStart, json!({})).await?)
+    }
+
+    async fn device_list(&self) -> Result<Vec<DeviceSummary>, DriverError> {
+        let v = self.call(DriverTool::DeviceList, json!({})).await?;
+        array_of(&v, "devices")?
+            .iter()
+            .map(|d| {
+                Ok(DeviceSummary {
+                    device_id: str_of(d, "deviceId")?,
+                    name: opt_str(d, "name").unwrap_or_default(),
+                    selected: d.get("selected").and_then(Value::as_bool).unwrap_or(false),
+                    online: d.get("online").and_then(Value::as_bool).unwrap_or(false),
+                    connected: d.get("connected").and_then(Value::as_bool).unwrap_or(false),
+                })
+            })
+            .collect()
+    }
+
+    async fn ams_inventory(&self, device_id: &str) -> Result<AmsInventory, DriverError> {
+        let v = self
+            .call(DriverTool::AmsInventory, json!({"deviceId": device_id}))
+            .await?;
+        parse_ams_inventory(&v)
+    }
+
+    async fn project_save(
+        &self,
+        path: &std::path::Path,
+        overwrite: bool,
+    ) -> Result<(), DriverError> {
+        let path = utf8_path(path, "project")?;
+        self.call(
+            DriverTool::ProjectSave,
+            json!({"path": path, "overwrite": overwrite}),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn export_sliced_3mf(
+        &self,
+        plate_index: u32,
+        plate_revision: &str,
+        slice_result_id: &str,
+        path: &std::path::Path,
+        overwrite: bool,
+    ) -> Result<ExportedPlate, DriverError> {
+        let path = utf8_path(path, "export")?;
+        let args = json!({
+            "plateIndex": plate_index,
+            "expectedPlateRevision": plate_revision,
+            "sliceResultId": slice_result_id,
+            "path": path,
+            "overwrite": overwrite,
+        });
+        let v = self.call(DriverTool::ExportSliced3mf, args).await?;
+        Ok(ExportedPlate {
+            slice_result_id: str_of(&v, "sliceResultId")?,
+            plate_index: u32_of(&v, "plateIndex")?,
+            path: str_of(&v, "path")?,
+            bytes: field(&v, "bytes")?
+                .as_u64()
+                .ok_or_else(|| proto("field `bytes` is not an unsigned integer"))?,
+        })
     }
 }
 

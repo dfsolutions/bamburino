@@ -191,3 +191,83 @@ pub struct FilamentUsage {
     pub grams: Option<f64>,
     pub meters: Option<f64>,
 }
+
+/// What `plate_delete` does with the instances on the plate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlateContents {
+    /// Refuse unless the plate is empty.
+    RequireEmpty,
+    /// Move the instances to another plate.
+    Move,
+    /// Delete the instances (objects left without instances go too).
+    Delete,
+}
+
+impl PlateContents {
+    /// The driver's wire string.
+    pub fn wire(&self) -> &'static str {
+        match self {
+            Self::RequireEmpty => "require_empty",
+            Self::Move => "move",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+/// Result of `plate_delete`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlateDeleted {
+    pub plates: PlateList,
+    pub moved_instances: u32,
+    pub deleted_objects: u32,
+    pub destination_plate_index: Option<u32>,
+}
+
+/// Result of `filament_assign`; `filament_index` is 0-based as the driver
+/// reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilamentAssignment {
+    pub object_id: String,
+    pub filament_index: u32,
+    pub preset: String,
+}
+
+/// One row of `device_list`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceSummary {
+    pub device_id: String,
+    pub name: String,
+    pub selected: bool,
+    pub online: bool,
+    pub connected: bool,
+}
+
+/// One AMS slot. `remaining_percent` is raw (`-1` = unknown to the printer).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmsTray {
+    pub slot_id: String,
+    pub exists: bool,
+    pub filament_type: String,
+    pub color: String,
+    pub remaining_percent: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmsUnit {
+    pub ams_id: String,
+    pub trays: Vec<AmsTray>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmsInventory {
+    pub units: Vec<AmsUnit>,
+}
+
+/// Result of `export_sliced_3mf`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportedPlate {
+    pub slice_result_id: String,
+    pub plate_index: u32,
+    pub path: String,
+    pub bytes: u64,
+}

@@ -80,4 +80,57 @@ pub trait DriverClient: Send + Sync {
         slice_result_id: &str,
         path: &Path,
     ) -> Result<DriverJob, DriverError>;
+    /// Adds an empty plate. Takes an undo snapshot.
+    async fn plate_create(&self) -> Result<PlateList, DriverError>;
+    /// Renames a plate. Takes an undo snapshot.
+    async fn plate_rename(
+        &self,
+        plate_index: u32,
+        plate_revision: &str,
+        name: &str,
+    ) -> Result<PlateList, DriverError>;
+    /// Deletes a plate, handling its instances per `contents`;
+    /// `target_plate_index` is only sent with `Move`. Takes an undo snapshot.
+    async fn plate_delete(
+        &self,
+        plate_index: u32,
+        plate_revision: &str,
+        contents: PlateContents,
+        target_plate_index: Option<u32>,
+    ) -> Result<PlateDeleted, DriverError>;
+    /// Moves one instance to another plate. Takes an undo snapshot.
+    async fn plate_move_instance(
+        &self,
+        object_id: &str,
+        instance_id: &str,
+        plate_index: u32,
+        plate_revision: &str,
+    ) -> Result<PlateList, DriverError>;
+    /// Assigns an object to a filament slot (0-based `filament_index`).
+    /// Takes an undo snapshot.
+    async fn filament_assign(
+        &self,
+        object_id: &str,
+        filament_index: u32,
+    ) -> Result<FilamentAssignment, DriverError>;
+    /// Starts the native arrange job (a UI job; poll it with `job_get`).
+    /// Takes an undo snapshot.
+    async fn arrange_start(&self) -> Result<DriverJob, DriverError>;
+    /// Read-only listing of the printers Studio knows about.
+    async fn device_list(&self) -> Result<Vec<DeviceSummary>, DriverError>;
+    /// Read-only AMS inventory of one printer; `remaining_percent` is raw.
+    async fn ams_inventory(&self, device_id: &str) -> Result<AmsInventory, DriverError>;
+    /// Saves the project to `path` (absolute, UTF-8). `overwrite` must be
+    /// `false` unless the caller explicitly asked. Takes no undo snapshot.
+    async fn project_save(&self, path: &Path, overwrite: bool) -> Result<(), DriverError>;
+    /// Exports the sliced 3MF of the selected plate only to `path`.
+    /// Takes no undo snapshot.
+    async fn export_sliced_3mf(
+        &self,
+        plate_index: u32,
+        plate_revision: &str,
+        slice_result_id: &str,
+        path: &Path,
+        overwrite: bool,
+    ) -> Result<ExportedPlate, DriverError>;
 }
