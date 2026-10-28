@@ -32,6 +32,13 @@ try {
     if ($Zip) {
         if (-not (Test-Path -LiteralPath $Zip -PathType Leaf)) { throw "zip not found: $Zip" }
         New-Item -ItemType Directory -Path $stage | Out-Null
+        $shaFile = "$Zip.sha256"
+        if (Test-Path -LiteralPath $shaFile) {
+            $want = ((Get-Content -LiteralPath $shaFile -Raw).Trim() -split '\s+')[0].ToLower()
+            $have = (Get-FileHash -LiteralPath $Zip -Algorithm SHA256).Hash.ToLower()
+            if ($want -ne $have) { throw "sha256 mismatch for $Zip (expected $want, got $have)" }
+            Write-Host 'sha256 verified'
+        }
         Expand-Archive -LiteralPath $Zip -DestinationPath $stage -Force
         # tolerate a single top-level folder inside the zip
         if (-not (Test-Path -LiteralPath (Join-Path $stage 'bambu-studio.exe'))) {
@@ -43,6 +50,7 @@ try {
         $src = $PSScriptRoot
     }
     if (-not (Test-Path -LiteralPath (Join-Path $src 'bambu-studio.exe'))) { throw "bambu-studio.exe not found in $src" }
+    if ((Resolve-Path -LiteralPath $src).Path.TrimEnd('\') -ieq $installDir.TrimEnd('\')) { throw 'the source folder is the install folder; run the installer from the extracted zip instead' }
     if (Test-RunningFromInstall) { throw 'Bambu Studio (Bamburino) is running; close it and retry.' }
 
     if (Test-Path -LiteralPath $installDir) { Remove-Item -LiteralPath $installDir -Recurse -Force }

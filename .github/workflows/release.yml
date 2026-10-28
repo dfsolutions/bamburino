@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # The only place that can write to the repository. Hosted runner, manual trigger by a maintainer
 # after build-service and build-studio are green on the commit the tag points at.
+# Source runs must come from push or workflow_dispatch (never pull_request).
+# If this workflow is interrupted while uploading assets, a draft release may remain: delete it by hand before retrying.
 # Creates the GitHub release once (gh release create fails if the release already exists).
 name: release
 on:
@@ -49,10 +51,12 @@ jobs:
           fi
           echo "tag $TAG -> commit $ref_sha"
           check_run() {
-            local id="$1" wf="$2" concl sha name
+            local id="$1" wf="$2" concl sha name event
             concl=$(gh run view "$id" --json conclusion --jq .conclusion)
             sha=$(gh run view "$id" --json headSha --jq .headSha)
             name=$(gh run view "$id" --json workflowName --jq .workflowName)
+            event=$(gh run view "$id" --json event --jq .event)
+            case "$event" in push|workflow_dispatch) ;; *) echo "::error::run $id ($wf) was triggered by '$event', only push or workflow_dispatch runs can be released"; exit 1 ;; esac
             [ "$name" = "$wf" ] || { echo "::error::run $id is workflow '$name', expected '$wf'"; exit 1; }
             [ "$concl" = "success" ] || { echo "::error::run $id ($wf) conclusion is '$concl', expected success"; exit 1; }
             [ "$sha" = "$ref_sha" ] || { echo "::error::run $id ($wf) built $sha, tag $TAG is $ref_sha"; exit 1; }

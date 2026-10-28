@@ -84,6 +84,18 @@ try {
         # re-install over an existing install works (upgrade)
         & pwsh -NoProfile -File $script -Zip $szip 2>&1 | Out-Null
         Assert-True ($LASTEXITCODE -eq 0 -and (Test-Path (Join-Path $inst 'bambu-studio.exe'))) 'second install (upgrade) works'
+        # sha256 next to the zip is verified when present
+        Set-Content "$szip.sha256" ("0" * 64 + "  x.zip") -Encoding ascii
+        & pwsh -NoProfile -File $script -Zip $szip 2>&1 | Out-Null
+        Assert-True ($LASTEXITCODE -ne 0) 'wrong .sha256 next to -Zip -> refuses'
+        $good = (Get-FileHash $szip -Algorithm SHA256).Hash.ToLower()
+        Set-Content "$szip.sha256" "$good  BambuStudio-test.zip" -Encoding ascii
+        & pwsh -NoProfile -File $script -Zip $szip 2>&1 | Out-Null
+        Assert-True ($LASTEXITCODE -eq 0) 'correct .sha256 next to -Zip -> installs'
+        # running the installer from the install folder itself is refused
+        Copy-Item $script $inst
+        & pwsh -NoProfile -File (Join-Path $inst 'install-studio.ps1') 2>&1 | Out-Null
+        Assert-True ($LASTEXITCODE -ne 0) 'source folder == install folder -> refuses'
         & pwsh -NoProfile -File $script -Uninstall 2>&1 | Out-Null
         Assert-True ($LASTEXITCODE -eq 0) '-Uninstall exits 0'
         Assert-True (-not (Test-Path $inst)) 'install folder removed'

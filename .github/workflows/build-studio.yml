@@ -2,6 +2,8 @@
 # Self-hosted build of the patched Bambu Studio (runner federico-pc, started on demand with ci/runner/start.ps1).
 # Only maintainers listed in ci/maintainers.txt get past the guard job. No write permission, no release:
 # the zip is uploaded as an artifact and released by release.yml.
+# The pre-build cleanup step deletes previous BambuStudio-bamburino-* files from the artifacts folder of the build root.
+# If release.yml is interrupted while uploading assets, a draft release may remain: delete it by hand before retrying.
 name: build-studio
 on:
   push:
@@ -83,7 +85,7 @@ jobs:
         with:
           name: studio-win64
           path: |
-            D:\bb\artifacts\BambuStudio-bamburino-*-win64.zip
-            D:\bb\artifacts\BambuStudio-bamburino-*-win64.zip.sha256
+            ${{ env.BAMBURINO_BUILD_ROOT }}\artifacts\BambuStudio-bamburino-*-win64.zip
+            ${{ env.BAMBURINO_BUILD_ROOT }}\artifacts\BambuStudio-bamburino-*-win64.zip.sha256
           if-no-files-found: error
           retention-days: 14

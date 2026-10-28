@@ -15,7 +15,7 @@ Write-Host ''
 Write-Host 'Next steps (as your normal user, not elevated):'
 Write-Host '  1. Give the service the driver token from Bambu Studio (Preferences, MCP server):'
 Write-Host '       & "$env:ProgramFiles\Bamburino\bamburino.exe" config set-driver-token'
-Write-Host '     then, from an elevated shell:  Restart-Service Bamburino'
+Write-Host '     (the service picks the token up on its next request, no restart needed)'
 Write-Host '  2. Print the line that registers Bamburino in your MCP client:'
 Write-Host '       & "$env:ProgramFiles\Bamburino\bamburino.exe" config client-snippet'
 exit 0

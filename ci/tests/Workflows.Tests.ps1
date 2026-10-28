@@ -38,7 +38,7 @@ foreach ($c in 'cargo fmt --all --check',
     'ci/package-service.ps1') {
     Assert-True ($svc.Contains($c)) "build-service runs: $c"
 }
-Assert-True ($svc -match 'name: bamburino-win64' -and $svc -match 'actions/cache@' -and $svc -match 'rustup show') 'build-service: artifact bamburino-win64, cargo cache, rustup show'
+Assert-True ($svc -match 'name: bamburino-win64' -and $svc -match 'actions/cache@' -and $svc -match 'rustup toolchain install') 'build-service: artifact bamburino-win64, cargo cache, rustup toolchain install'
 
 # build-studio: self-hosted behind guard
 Assert-True ($std -match '(?m)^\s+branches:\s*\[main\]' -and $std -match 'driver/\*\*' -and $std -match '\.github/workflows/build-studio\.yml' -and $std -match "tags:\s*\['v\*'\]" -and $std -match '(?m)^\s+workflow_dispatch:') 'build-studio: push main (paths) + tags v*, workflow_dispatch'
@@ -60,6 +60,52 @@ Assert-True ($rel -match '(?m)^  release:\s*$') 'release: job id release'
 Assert-True (([regex]::Matches($rel, 'runs-on:')).Count -eq 1 -and $rel -match 'runs-on: ubuntu-latest') 'release: exactly one job, on ubuntu-latest'
 Assert-True (([regex]::Matches($rel, 'contents: write')).Count -eq 1) 'release: contents: write exactly once'
 Assert-True ($rel -match 'gh release create' -and $rel -match 'sha256' -and $rel -match 'gh run view' -and $rel -match 'run-id:' -and $rel -match 'github-token:') 'release: verifies runs, sha256, creates the release'
+
+# ---- pin age, checkout hygiene, no workflow_run ----
+$denyTags = @('v7.1.0')   # releases younger than 14 days when pinned: setup-python v7.1.0 (2026-10-22)
+$all = $svc + $std + $rel
+foreach ($m in [regex]::Matches($all, 'uses:\s*\S+@[0-9a-f]{40}\s*#\s*(v\S+)')) {
+    Assert-True ($m.Groups[1].Value -notin $denyTags) "pin comment $($m.Groups[1].Value) is not in the too-recent deny-list"
+}
+Assert-True ($svc -match 'actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7\.0\.0') 'setup-python is pinned to v7.0.0 (>= 14 days old)'
+Assert-True ($all -notmatch '(?m)^\s+workflow_run:') 'no workflow_run trigger anywhere'
+$studioJob = $std.Substring($std.IndexOf('  studio:'))
+Assert-True ($studioJob -match 'actions/checkout@[0-9a-f]{40} # v\S+\s+with:\s+persist-credentials: false') 'self-hosted checkout sets persist-credentials: false'
+Assert-True ($svc -match 'rustup toolchain install' -and $svc -notmatch 'rustup show') 'build-service installs the pinned toolchain (rustup toolchain install)'
+Assert-True ($std -notmatch 'D:\bb\artifacts' -and $std -match 'env\.BAMBURINO_BUILD_ROOT') 'build-studio upload path uses BAMBURINO_BUILD_ROOT'
+
+# ---- release.yml: event check (YAML + the real shell function against a fake gh) ----
+Assert-True ($rel -match '--json event' -and $rel -match 'push\|workflow_dispatch\) ;;') 'release: check_run requires event push or workflow_dispatch'
+$lines = $rel -split "`r?`n"
+$a = ($lines | Select-String -SimpleMatch 'check_run() {').LineNumber
+if ($a) {
+    $fn = New-Object System.Collections.Generic.List[string]
+    for ($i = $a - 1; $i -lt $lines.Count; $i++) { $fn.Add($lines[$i].Substring(10)); if ($lines[$i] -match '^          }$') { break } }
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("rel-" + [guid]::NewGuid() + ".sh")
+    $stub = @'
+gh() { case "$*" in
+  *"--json event"*) echo "$FAKE_EVENT";;
+  *"--json conclusion"*) echo success;;
+  *"--json headSha"*) echo abc;;
+  *"--json workflowName"*) echo build-service;;
+esac; }
+ref_sha=abc
+'@
+    [IO.File]::WriteAllText($tmp, ($stub + "`n" + ($fn -join "`n") + "`ncheck_run 1 build-service`n"))
+    $bash = (Get-Command bash -ErrorAction SilentlyContinue)
+    if ($bash) {
+        foreach ($ev in 'pull_request', 'pull_request_target', 'schedule') {
+            $env:FAKE_EVENT = $ev; & bash $tmp 2>&1 | Out-Null
+            Assert-True ($LASTEXITCODE -ne 0) "check_run rejects a '$ev' run"
+        }
+        foreach ($ev in 'push', 'workflow_dispatch') {
+            $env:FAKE_EVENT = $ev; & bash $tmp 2>&1 | Out-Null
+            Assert-True ($LASTEXITCODE -eq 0) "check_run accepts a '$ev' run"
+        }
+        Remove-Item Env:FAKE_EVENT
+    } else { Write-Host '  skip bash not found: shell snippet test' }
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+} else { Assert-True $false 'release: check_run function found' }
 
 if ($failures.Count -gt 0) { Write-Host "`n$($failures.Count) assertion(s) failed"; exit 1 }
 Write-Host "`nAll assertions passed"
