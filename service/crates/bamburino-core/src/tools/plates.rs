@@ -83,7 +83,9 @@ pub(crate) fn locked_plate_error(e: DriverError) -> ToolError {
     {
         return ToolError::new(
             ToolErrorCode::PlateLocked,
-            format!("{message}. Unlock the plate in Bambu Studio and retry; nothing was changed."),
+            format!(
+                "{message}; unlock the plate(s) in Bambu Studio and retry. Nothing was changed."
+            ),
         );
     }
     write_error(e)
@@ -98,7 +100,15 @@ fn plate_write_error(e: DriverError) -> ToolError {
             return locked_plate_error(e);
         } else if m.contains("last plate") {
             Some(ToolErrorCode::LastPlate)
-        } else if m.contains("contains instances") || m.contains("unlocked and empty") {
+        } else if m.contains("unlocked and empty") {
+            // One driver message for two causes (locked OR not empty): the
+            // backstop cannot tell, so the reason says so; the delete tool
+            // refines it with a fresh `plate_list` (see `refine_refusal`).
+            return ToolError::new(ToolErrorCode::PlateNotEmpty, message.clone())
+                .with_details(json!({ "reason": "target_unavailable" }));
+        } else if m.contains("also has instances outside") {
+            return invalid_arg(m, "object_spans_plates");
+        } else if m.contains("contains instances") {
             Some(ToolErrorCode::PlateNotEmpty)
         } else if m.contains("out of range") || m.contains("outside current state") {
             Some(ToolErrorCode::PlateNotFound)
@@ -110,6 +120,48 @@ fn plate_write_error(e: DriverError) -> ToolError {
         }
     }
     write_error(e)
+}
+
+/// Sharpens a backstop refusal with a fresh `plate_list` read (best effort; on
+/// a read failure the error is returned as it is). `target`: the move
+/// destination of a delete. `PLATE_NOT_EMPTY`/`target_unavailable` becomes
+/// `PLATE_LOCKED` (with `plate_index`) when the target is locked now, else
+/// `target_not_empty`. A `PLATE_LOCKED` without `plate_index` gets one when
+/// exactly one plate is locked, and `locked_plates` always.
+async fn refine_refusal(
+    drv: &Arc<dyn DriverClient>,
+    mut e: ToolError,
+    target: Option<u32>,
+) -> ToolError {
+    let unavailable =
+        e.code == ToolErrorCode::PlateNotEmpty && e.details["reason"] == "target_unavailable";
+    let locked_no_index =
+        e.code == ToolErrorCode::PlateLocked && e.details["plate_index"].is_null();
+    if !unavailable && !locked_no_index {
+        return e;
+    }
+    let Ok(list) = drv.plate_list().await else {
+        return e;
+    };
+    let locked: Vec<u32> = list
+        .plates
+        .iter()
+        .filter(|p| p.locked)
+        .map(|p| p.index)
+        .collect();
+    if unavailable {
+        let t = target.unwrap_or(0);
+        if locked.contains(&t) {
+            return plate_locked(t);
+        }
+        e.details = json!({ "reason": "target_not_empty", "plate_index": t });
+        return e;
+    }
+    e.details["locked_plates"] = json!(locked);
+    if let [only] = locked.as_slice() {
+        e.details["plate_index"] = json!(only);
+    }
+    e
 }
 
 fn plate_not_found(list: &PlateList, index: u32) -> ToolError {
@@ -193,12 +245,18 @@ impl Tools {
             .guarded_mutation(a.expected_revision, |drv| async move {
                 drv.plate_create().await.map_err(plate_write_error)?;
                 // The new plate is the last one; confirm it from the driver.
-                let list = drv.plate_list().await.map_err(read_error)?;
+                let created = |mut e: ToolError| {
+                    e.details["outcome"] = json!("plate_created");
+                    e.message
+                        .push_str(" The plate WAS created; read the state again.");
+                    e
+                };
+                let list = drv.plate_list().await.map_err(|e| created(read_error(e)))?;
                 let last = list.plates.last().ok_or_else(|| {
-                    ToolError::new(
+                    created(ToolError::new(
                         ToolErrorCode::DriverError,
                         "the driver reports no plates after plate_create",
-                    )
+                    ))
                 })?;
                 let (index, listed) = (last.index, last.name.clone());
                 let Some(name) = name else {
@@ -350,7 +408,11 @@ impl Tools {
                             .await
                     }
                 })
-                .await?;
+                .await;
+                let done = match done {
+                    Ok(d) => d,
+                    Err(e) => return Err(refine_refusal(&drv, e, target).await),
+                };
                 Ok((contents, done))
             })
             .await?;
@@ -381,10 +443,8 @@ impl Tools {
                 let target = check_plate(&list, a.plate_index)?;
                 let from = inst.plate_index;
                 let id = inst.id.clone();
-                if from == a.plate_index as i32 {
-                    // No driver call: no snapshot would follow.
-                    return Ok((id, from, false));
-                }
+                // Lock checks first, so a locked plate is refused like the
+                // driver would, even for a same-plate request.
                 if let Some(src) = list.plates.iter().find(|p| p.index as i32 == from)
                     && src.locked
                 {
@@ -393,14 +453,21 @@ impl Tools {
                 if target.locked {
                     return Err(plate_locked(a.plate_index));
                 }
-                with_plate_revision(&drv, |rev| {
+                if from == a.plate_index as i32 {
+                    // No driver call: no snapshot would follow.
+                    return Ok((id, from, false));
+                }
+                let moved = with_plate_revision(&drv, |rev| {
                     let (drv, id) = (drv.clone(), id.clone());
                     async move {
                         drv.plate_move_instance(&a.object_id, &id, a.plate_index, &rev)
                             .await
                     }
                 })
-                .await?;
+                .await;
+                if let Err(e) = moved {
+                    return Err(refine_refusal(&drv, e, None).await);
+                }
                 Ok((id, from, true))
             })
             .await?;
@@ -463,6 +530,31 @@ mod tests {
         assert_eq!(calls.iter().filter(|c| *c == "plate_list").count(), 1);
         let after = drv.plate_list().await.unwrap();
         assert_ne!(after.plates[0].name, "x");
+    }
+
+    #[tokio::test]
+    async fn refine_refusal_uses_a_fresh_read_to_tell_locked_from_not_empty() {
+        let mock = Arc::new(MockDriver::new());
+        mock.set_plate_count(3);
+        mock.lock_plate(2, true);
+        let drv: Arc<dyn DriverClient> = mock.clone();
+        let unavailable = || {
+            ToolError::new(ToolErrorCode::PlateNotEmpty, "x")
+                .with_details(json!({ "reason": "target_unavailable" }))
+        };
+        // Target locked now: PLATE_LOCKED with its index.
+        let e = refine_refusal(&drv, unavailable(), Some(2)).await;
+        assert_eq!(e.code, ToolErrorCode::PlateLocked);
+        assert_eq!(e.details["plate_index"], 2);
+        // Target not locked: it must be non-empty.
+        let e = refine_refusal(&drv, unavailable(), Some(1)).await;
+        assert_eq!(e.code, ToolErrorCode::PlateNotEmpty);
+        assert_eq!(e.details["reason"], "target_not_empty");
+        // A backstop PLATE_LOCKED gets the single locked plate as plate_index.
+        let locked = ToolError::new(ToolErrorCode::PlateLocked, "x");
+        let e = refine_refusal(&drv, locked, None).await;
+        assert_eq!(e.details["plate_index"], 2);
+        assert_eq!(e.details["locked_plates"], json!([2]));
     }
 
     #[test]
