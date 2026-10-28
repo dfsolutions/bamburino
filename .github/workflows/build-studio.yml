@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Self-hosted build of the patched Bambu Studio (runner federico-pc, started on demand with ci/runner/start.ps1).
+# Only maintainers listed in ci/maintainers.txt get past the guard job. No write permission, no release:
+# the zip is uploaded as an artifact and released by release.yml.
+name: build-studio
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'driver/**'
+      - '.github/workflows/build-studio.yml'
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+# One Studio build at a time (shared build root D:\bb). Queued runs wait, they are never cancelled midway.
+concurrency:
+  group: build-studio
+  cancel-in-progress: false
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { sparse-checkout: ci/maintainers.txt }
+      - run: grep -qxF "${{ github.actor }}" ci/maintainers.txt || { echo "::error::actor not allowed on self-hosted runner"; exit 1; }
+  studio:
+    needs: [guard]
+    runs-on: [self-hosted, bamburino-win]
+    timeout-minutes: 720
+    env:
+      BAMBURINO_BUILD_ROOT: D:\bb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Clear artifacts of previous builds
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:BAMBURINO_BUILD_ROOT 'artifacts'
+          if (Test-Path -LiteralPath $dir) {
+              Get-ChildItem -LiteralPath $dir -File -Filter 'BambuStudio-bamburino-*' | Remove-Item -Force
+          }
+      - name: Build Studio (driver/build.ps1 -Step all)
+        id: build
+        shell: pwsh
+        run: |
+          pwsh driver/build.ps1 -Step all
+          $code = $LASTEXITCODE
+          if ($null -eq $code) { $code = 1 }
+          "exit_code=$code" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          exit 0
+      - name: Report build result
+        shell: pwsh
+        env:
+          BUILD_EXIT: ${{ steps.build.outputs.exit_code }}
+        run: |
+          $code = [int]$env:BUILD_EXIT
+          if ($code -ne 0) {
+              $msg = switch ($code) {
+                  10 { '10 prerequisites missing' }
+                  20 { '20 patch does not apply' }
+                  21 { '21 patch_id differs from driver/upstream.toml' }
+                  30 { '30 dependency build failed' }
+                  40 { '40 app build failed' }
+                  45 { '45 MCP standalone tests failed' }
+                  50 { '50 packaging failed' }
+                  default { "$code unexpected exit code from driver/build.ps1" }
+              }
+              Write-Host "::error::driver/build.ps1 failed: $msg"
+              exit $code
+          }
+          $dir = Join-Path $env:BAMBURINO_BUILD_ROOT 'artifacts'
+          $zips = @(Get-ChildItem -LiteralPath $dir -File -Filter 'BambuStudio-bamburino-*-win64.zip')
+          if ($zips.Count -ne 1) { Write-Host "::error::expected exactly one Studio zip in $dir, found $($zips.Count)"; exit 1 }
+          $sha = "$($zips[0].FullName).sha256"
+          if (-not (Test-Path -LiteralPath $sha)) { Write-Host "::error::missing $sha"; exit 1 }
+          $want = ((Get-Content -LiteralPath $sha -Raw).Trim() -split '\s+')[0].ToLower()
+          $have = (Get-FileHash -LiteralPath $zips[0].FullName -Algorithm SHA256).Hash.ToLower()
+          if ($want -ne $have) { Write-Host "::error::sha256 mismatch for $($zips[0].Name)"; exit 1 }
+          Write-Host "build ok: $($zips[0].Name) ($have)"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: studio-win64
+          path: |
+            D:\bb\artifacts\BambuStudio-bamburino-*-win64.zip
+            D:\bb\artifacts\BambuStudio-bamburino-*-win64.zip.sha256
+          if-no-files-found: error
+          retention-days: 14

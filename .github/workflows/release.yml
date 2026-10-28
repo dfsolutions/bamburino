@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# The only place that can write to the repository. Hosted runner, manual trigger by a maintainer
+# after build-service and build-studio are green on the commit the tag points at.
+# Creates the GitHub release once (gh release create fails if the release already exists).
+name: release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release, e.g. v0.1.0'
+        required: true
+        type: string
+      service_run_id:
+        description: 'Run id of a successful build-service run on the tag commit'
+        required: true
+        type: string
+      studio_run_id:
+        description: 'Run id of a successful build-studio run on the tag commit'
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ inputs.tag }}
+      SERVICE_RUN: ${{ inputs.service_run_id }}
+      STUDIO_RUN: ${{ inputs.studio_run_id }}
+    steps:
+      - name: Verify tag and build runs
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "::error::tag '$TAG' is not vMAJOR.MINOR.PATCH[-suffix]"; exit 1; }
+          [[ "$SERVICE_RUN" =~ ^[0-9]+$ && "$STUDIO_RUN" =~ ^[0-9]+$ ]] || { echo "::error::run ids must be numeric"; exit 1; }
+          ref_type=$(gh api "repos/$GH_REPO/git/ref/tags/$TAG" --jq .object.type) || { echo "::error::tag $TAG does not exist"; exit 1; }
+          ref_sha=$(gh api "repos/$GH_REPO/git/ref/tags/$TAG" --jq .object.sha)
+          if [ "$ref_type" = "tag" ]; then
+            ref_sha=$(gh api "repos/$GH_REPO/git/tags/$ref_sha" --jq .object.sha)
+          fi
+          echo "tag $TAG -> commit $ref_sha"
+          check_run() {
+            local id="$1" wf="$2" concl sha name
+            concl=$(gh run view "$id" --json conclusion --jq .conclusion)
+            sha=$(gh run view "$id" --json headSha --jq .headSha)
+            name=$(gh run view "$id" --json workflowName --jq .workflowName)
+            [ "$name" = "$wf" ] || { echo "::error::run $id is workflow '$name', expected '$wf'"; exit 1; }
+            [ "$concl" = "success" ] || { echo "::error::run $id ($wf) conclusion is '$concl', expected success"; exit 1; }
+            [ "$sha" = "$ref_sha" ] || { echo "::error::run $id ($wf) built $sha, tag $TAG is $ref_sha"; exit 1; }
+          }
+          check_run "$SERVICE_RUN" build-service
+          check_run "$STUDIO_RUN" build-studio
+          if gh release view "$TAG" >/dev/null 2>&1; then echo "::error::release $TAG already exists"; exit 1; fi
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: bamburino-win64
+          path: dist/service
+          run-id: ${{ inputs.service_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: studio-win64
+          path: dist/studio
+          run-id: ${{ inputs.studio_run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify checksums
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(dist/service/*.zip dist/studio/*.zip)
+          [ "${#files[@]}" -eq 2 ] || { echo "::error::expected exactly 2 zips, found ${#files[@]}"; exit 1; }
+          for z in "${files[@]}"; do
+            [ -f "$z.sha256" ] || { echo "::error::missing $z.sha256"; exit 1; }
+            want=$(awk '{print tolower($1)}' "$z.sha256" | head -n1)
+            have=$(sha256sum "$z" | awk '{print $1}')
+            [ "$want" = "$have" ] || { echo "::error::sha256 mismatch for $z"; exit 1; }
+            echo "ok $z $have"
+          done
+      - name: Create release
+        run: |
+          set -euo pipefail
+          flags=()
+          case "$TAG" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes "${flags[@]}" \
+            dist/service/*.zip dist/service/*.zip.sha256 \
+            dist/studio/*.zip dist/studio/*.zip.sha256
