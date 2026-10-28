@@ -1,0 +1,17 @@
+diff --git a/tests/mcp/CMakeLists.txt b/tests/mcp/CMakeLists.txt
+index 2fbf4d0..d0097de 100644
+--- a/tests/mcp/CMakeLists.txt
++++ b/tests/mcp/CMakeLists.txt
+@@ -13,7 +13,11 @@ target_include_directories(mcp_server_tests PRIVATE ../../src)
+ target_compile_definitions(mcp_server_tests PRIVATE BOOST_ERROR_CODE_HEADER_ONLY)
+ target_link_libraries(mcp_server_tests PRIVATE OpenSSL::Crypto Threads::Threads Boost::filesystem)
+ if(WIN32)
+-    target_link_libraries(mcp_server_tests PRIVATE advapi32 ws2_32)
++    # <windows.h> (via McpGcodeExport.hpp) must not pull in winsock.h before Boost.Asio includes winsock2.h;
++    # Boost libraries are linked explicitly, as in the app build (no auto-link by toolset-tagged name);
++    # the static OpenSSL libcrypto needs crypt32 (CAPI engine).
++    target_compile_definitions(mcp_server_tests PRIVATE WIN32_LEAN_AND_MEAN BOOST_ALL_NO_LIB)
++    target_link_libraries(mcp_server_tests PRIVATE advapi32 ws2_32 crypt32)
+ endif()
+ enable_testing()
+ add_test(NAME mcp_server COMMAND mcp_server_tests)

@@ -10,6 +10,6 @@ pr = 12485
 pr_repo = "otarkhan/BambuStudio"
 pr_head = "c31e97108e4d1ea137f90a075502e4d4536535fe"
 pr_base = "da8b44ee34dd349f2ae0df3f1cbae366df482354"
-patch_id = "fed7c316c2e1"
+patch_id = "2703638ef313"
 build_suffix_prefix = "bamburino"
 port = 27183

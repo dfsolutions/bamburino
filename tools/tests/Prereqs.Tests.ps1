@@ -57,6 +57,11 @@ if (@($pathBefore -split ';' | Where-Object { $_.TrimEnd('\') -eq $gitCmd }) -an
     throw "$gitCmd was removed from the session PATH (git must keep working)"
 }
 $cmakeOut = (& $env:BAMBURINO_CMAKE --version) -join "`n"
+# pkg-config is the real executable (pkg-config-lite), not Strawberry's Perl script of the same name.
+if (-not $env:PKG_CONFIG_EXECUTABLE -or -not (Test-Path -LiteralPath $env:PKG_CONFIG_EXECUTABLE -PathType Leaf)) { throw "PKG_CONFIG_EXECUTABLE is not an existing file: '$env:PKG_CONFIG_EXECUTABLE'" }
+if ($env:PKG_CONFIG_EXECUTABLE -notmatch '\.exe$' -or $env:PKG_CONFIG_EXECUTABLE -like 'C:\Strawberry\*') { throw "PKG_CONFIG_EXECUTABLE is not a non-Strawberry .exe: $env:PKG_CONFIG_EXECUTABLE" }
+$pkgFirst = (Get-Command pkg-config -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+if ($pkgFirst -ne $env:PKG_CONFIG_EXECUTABLE) { throw "first pkg-config on PATH is $pkgFirst, expected $env:PKG_CONFIG_EXECUTABLE" }
 if ($cmakeOut -notmatch 'cmake version (\d+\.\d+\.\d+)') { throw "cannot parse cmake --version: $cmakeOut" }
 if ([version]$Matches[1] -lt [version]'3.24.0') { throw "cmake $($Matches[1]) < 3.24" }
 

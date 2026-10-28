@@ -5,9 +5,11 @@
     -Check   prints one line 'OK|MISSING <name> <detail>' per prerequisite; exit 0 if all OK, 10 otherwise.
     -Install installs only what is missing (Strawberry Perl, pkg-config-lite, git core.longpaths), then checks.
              Visual Studio and the Windows SDK are never installed by this script.
-    -Export  (with -Check or -Install) sets session variables BAMBURINO_CMAKE and BAMBURINO_WIN10SDK_PATH
+    -Export  (with -Check or -Install) sets session variables BAMBURINO_CMAKE, BAMBURINO_WIN10SDK_PATH and
+             PKG_CONFIG_EXECUTABLE (the pkg-config-lite pkg-config.exe; Strawberry perl\bin ships a Perl script named
+             'pkg-config' that CMake's find_program would otherwise pick and that cannot run as a program)
              and rebuilds the session PATH for a deterministic toolchain: the VS-bundled CMake bin directory first,
-             then Strawberry perl\bin and pkg-config; C:\Strawberry\c\bin (MinGW gcc, headers, libs, its own CMake)
+             then pkg-config and Strawberry perl\bin; C:\Strawberry\c\bin (MinGW gcc, headers, libs, its own CMake)
              and Git for Windows' MinGW/MSYS directories (<ProgramFiles>\Git\mingw64\bin, Git\usr\bin,
              Git\usr\local\bin; Git\cmd stays, so git keeps working) are removed, so MinGW headers, libs, zlib/curl
              and link.exe cannot leak into find_package or shadow MSVC during the upstream build.
@@ -183,9 +185,10 @@ foreach ($name in $results.Keys) {
 if ($Export) {
     if ($results['cmake'].Ok) { $env:BAMBURINO_CMAKE = $results['cmake'].Path }
     if ($results['windows-sdk'].Ok) { $env:BAMBURINO_WIN10SDK_PATH = $results['windows-sdk'].Path }
+    if ($results['pkg-config'].Ok) { $env:PKG_CONFIG_EXECUTABLE = $results['pkg-config'].Path }
     # Drop the MinGW/MSYS directories ($PathDenyList), then prepend in reverse priority order so the CMake bin directory ends up first.
     $paths = @($env:Path -split ';' | Where-Object { $_ -and $PathDenyList -notcontains $_.TrimEnd('\') })
-    foreach ($tool in 'pkg-config', 'strawberry-perl', 'cmake') {
+    foreach ($tool in 'strawberry-perl', 'pkg-config', 'cmake') {
         if (-not $results[$tool].Ok) { continue }
         $dir = Split-Path -Parent $results[$tool].Path
         $paths = @($dir) + @($paths | Where-Object { $_.TrimEnd('\') -ne $dir.TrimEnd('\') })

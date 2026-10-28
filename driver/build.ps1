@@ -27,9 +27,30 @@
                  output in the step log. The sentinel is written only after both succeed. deps-out is not wiped on a
                  mismatch: deps\build keeps the ExternalProject stamps, so a re-run after a failure resumes there.
                  Touches only <clone>\deps\build (kept by -Step patch) and deps-out, never the rest of the clone.
+    -Step app    Builds and installs the patched app. Requires a patched clone on studio.tag_commit (else exit 21) and the
+                 deps sentinel (else exit 21); sets up the toolchain in-process like deps (exit 10 when prerequisites
+                 are missing). In <clone>\build it runs, in the same step every time,
+                 cmake .. -G "Visual Studio 17 2022" -A x64 -DBBL_RELEASE_TO_PUBLIC=1 -DBBL_INTERNAL_TESTING=0
+                 -DCMAKE_PREFIX_PATH=<BuildRoot>\deps-out\usr\local -DCMAKE_INSTALL_PREFIX=<BuildRoot>\install-dir
+                 -DCMAKE_BUILD_TYPE=Release -DWIN10SDK_PATH=<BAMBURINO_WIN10SDK_PATH> <Get-IdentityCMakeDefines>
+                 -DPKG_CONFIG_EXECUTABLE=<PKG_CONFIG_EXECUTABLE from prereqs.ps1 -Export>
+                 then cmake --build . --target install --config Release -- -m /v:minimal. The configure command line
+                 is written to the step log as '== cmake configure: ...'. Exit 40 when configure or build fails or
+                 install-dir\bambu-studio.exe is missing afterwards.
+    -Step test   PR #12485 standalone MCP tests: cmake -S tests/mcp -B build-mcp-tests (in the clone) against the deps
+                 prefix, build Release, ctest -C Release --output-on-failure, then python
+                 tests/mcp/test_legacy_contract.py -v, run on an LF export of the clone's index (git checkout-index
+                 into a temporary folder under the build root; the test pins the oracle's SHA-256 over LF bytes and the
+                 work tree may be CRLF). Python is needed on the build machine only. Exit 45 on any failure.
+    -Step package  Zips the contents of <BuildRoot>\install-dir into
+                 <BuildRoot>\artifacts\BambuStudio-bamburino-<studio.version>-<patch_id>-win64.zip and writes
+                 <zip>.sha256 (sha256sum format). Exit 50 on any failure (including a missing bambu-studio.exe).
+    -Step all    prereqs -> fetch -> patch -> deps -> app -> test -> package, each in its own pwsh process; fetch
+                 runs only when the clone folder is absent. The prereqs check uses the app threshold (12 GB) when the
+                 deps sentinel exists, else the deps one (Get-StepMinFreeGB). Stops at the first non-zero exit code and returns it.
     Free disk: every step that calls prereqs.ps1 passes -MinFreeGB (Get-StepMinFreeGB): 25 GB only before the
     first deps build (deps without <clone>\deps\build: the peak), 12 GB for deps once deps\build exists (resume)
-    and for the app step (Task 8 must call Get-StepMinFreeGB -Step app).
+    and for the app step; 2 GB for the test step.
     Step order: -Step fetch is only for an absent or clean clone (a patched clone is dirty, so fetch exits 20
     on it by design). -Step patch does its own reset and never needs fetch again. The deps and app steps never
     call fetch; an 'all' step runs fetch only when the clone is missing.
@@ -40,11 +61,13 @@
     version.inc are not changed.
     Exit codes: 0 ok; 20 clone dirty (fetch) or patch does not apply (patch);
                 21 clone at an unexpected state (fetch, patch, deps) or patch_id mismatch (patch);
-                10 prerequisites missing (deps); 30 cmake configure or msbuild failed (deps); 1 any other error.
+                10 prerequisites missing (deps, app, test); 30 cmake configure or msbuild failed (deps);
+                40 app configure/build failed; 45 MCP standalone tests failed; 50 packaging failed; 1 any other error.
+                21 also covers a missing, unpatched or wrong-commit clone, or missing deps, for app and test.
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('fetch', 'patch', 'deps')][string]$Step
+    [Parameter(Mandatory)][ValidateSet('fetch', 'patch', 'deps', 'app', 'test', 'package', 'all')][string]$Step
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -222,8 +245,10 @@ function Get-DepsKey {
 
 function Get-StepMinFreeGB {
     # Free space (GB) prereqs.ps1 -MinFreeGB must require on the build root drive for a step.
-    # 25 only for the first deps build (peak); 12 for a deps resume/no-op and for the app step.
-    param([Parameter(Mandatory)][ValidateSet('deps', 'app')][string]$Step, [string]$Src = (Join-Path (Get-BuildRoot) 'BambuStudio'))
+    # 25 only for the first deps build (peak); 12 for a deps resume/no-op and for the app step; 2 for the MCP
+    # standalone tests (two source files against the prebuilt deps).
+    param([Parameter(Mandatory)][ValidateSet('deps', 'app', 'test')][string]$Step, [string]$Src = (Join-Path (Get-BuildRoot) 'BambuStudio'))
+    if ($Step -eq 'test') { return 2 }
     if ($Step -eq 'deps' -and -not (Test-Path -LiteralPath (Join-Path $Src 'deps\build') -PathType Container)) { return 25 }
     return 12
 }
@@ -288,9 +313,227 @@ function Invoke-Deps {
     Write-Host "OK deps: built into $out in $mins min; sentinel $keyFile = $key"
 }
 
+function Format-CommandLine {
+    # One log line for a native command: arguments containing spaces are double-quoted.
+    param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments = @())
+    $parts = @($Exe) + @($Arguments) | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }
+    return ($parts -join ' ')
+}
+
+function Assert-PatchedClone {
+    # The app and test steps build the patched clone: it must exist, sit on studio.tag_commit and carry the patch set.
+    param([Parameter(Mandatory)][string]$Src, [Parameter(Mandatory)][string]$Commit)
+    if (-not (Test-Path -LiteralPath $Src) -or -not (Test-CloneRoot $Src)) {
+        Write-Host "ERROR $Src is missing or not the root of a git work tree. Run driver/build.ps1 -Step fetch and -Step patch first."
+        exit 21
+    }
+    $head = (Invoke-Git -C $Src rev-parse HEAD | Select-Object -First 1).Trim()
+    if ($head -ne $Commit) { Write-Host "ERROR $Src is at $head, expected $Commit. Run driver/build.ps1 -Step patch."; exit 21 }
+    if (-not (Test-Path -LiteralPath (Join-Path $Src 'src\slic3r\GUI\bamburino_identity.h.in') -PathType Leaf)) {
+        Write-Host "ERROR $Src is not patched (no src\slic3r\GUI\bamburino_identity.h.in). Run driver/build.ps1 -Step patch."
+        exit 21
+    }
+}
+
+function Enter-BuildToolchain {
+    # VS developer environment, then prereqs.ps1 -Check -Export in-process (VS CMake first, MinGW bins off PATH).
+    param([Parameter(Mandatory)][int]$MinFreeGB)
+    Enter-VsEnv
+    & (Join-Path $PSScriptRoot 'prereqs.ps1') -Check -Export -MinFreeGB $MinFreeGB | Out-Host
+    if ($LASTEXITCODE -ne 0) { Write-Host "ERROR prerequisites missing (prereqs.ps1 exit $LASTEXITCODE)"; exit 10 }
+    $cmake = $env:BAMBURINO_CMAKE
+    if (-not $cmake -or -not (Test-Path -LiteralPath $cmake -PathType Leaf)) { throw "BAMBURINO_CMAKE not set by prereqs.ps1 -Export: '$cmake'" }
+    return $cmake
+}
+
+function Invoke-App {
+    $u = Get-Upstream
+    $want = $u['studio.tag_commit']
+    if ($want -notmatch '^[0-9a-f]{40}$') { throw 'upstream.toml: studio.tag_commit not set' }
+    $root = Get-BuildRoot
+    $src = Join-Path $root 'BambuStudio'
+    Assert-PatchedClone -Src $src -Commit $want
+    $prefix = Join-Path $root 'deps-out\usr\local'
+    if (-not (Test-Path -LiteralPath (Join-Path $root 'deps-out\.bamburino-deps-key') -PathType Leaf)) {
+        Write-Host "ERROR dependencies not built ($root\deps-out\.bamburino-deps-key missing). Run driver/build.ps1 -Step deps."
+        exit 21
+    }
+    # The identity is never cached (patch 0100), so it is passed on every configure, right before the build.
+    $identity = @(Get-IdentityCMakeDefines -Upstream $u)
+
+    $minFree = Get-StepMinFreeGB -Step app -Src $src
+    $cmake = Enter-BuildToolchain -MinFreeGB $minFree
+    $install = Join-Path $root 'install-dir'
+    $buildDir = Join-Path $src 'build'
+    New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
+    $log = Write-StepLog -Step 'app'
+    $configureArgs = @('..', '-G', 'Visual Studio 17 2022', '-A', 'x64', '-DBBL_RELEASE_TO_PUBLIC=1', '-DBBL_INTERNAL_TESTING=0',
+        "-DCMAKE_PREFIX_PATH=$prefix", "-DCMAKE_INSTALL_PREFIX=$install", '-DCMAKE_BUILD_TYPE=Release',
+        "-DWIN10SDK_PATH=$env:BAMBURINO_WIN10SDK_PATH") + $identity
+    # Explicit, so a cache from an earlier configure cannot keep Strawberry's Perl 'pkg-config' script.
+    if (-not $env:PKG_CONFIG_EXECUTABLE) { throw 'PKG_CONFIG_EXECUTABLE not set by prereqs.ps1 -Export' }
+    $configureArgs += "-DPKG_CONFIG_EXECUTABLE=$env:PKG_CONFIG_EXECUTABLE"
+    # /v:minimal keeps warnings and errors but not the per-file progress, so the log stays small on a full build.
+    $buildArgs = @('--build', '.', '--target', 'install', '--config', 'Release', '--', '-m', '/v:minimal')
+    Add-Log $log "== patch_id $($u['driver.patch_id']) on studio.tag_commit $want"
+    Add-Log $log "== prereqs.ps1 -MinFreeGB $minFree"
+    Add-Log $log "== PATH=$env:Path"
+    Add-Log $log "== cwd $buildDir"
+    Add-Log $log "== cmake configure: $(Format-CommandLine $cmake $configureArgs)"
+    Write-Host "Building the app into $install; log: $log"
+    $t0 = Get-Date
+    Push-Location -LiteralPath $buildDir
+    try {
+        & $cmake @configureArgs *>> $log
+        $code = $LASTEXITCODE
+        Add-Log $log "== cmake configure exit $code"
+        if ($code -ne 0) { Write-Host "ERROR cmake configure failed (exit $code), see $log"; exit 40 }
+        Add-Log $log "== cmake build: $(Format-CommandLine $cmake $buildArgs)"
+        & $cmake @buildArgs *>> $log
+        $code = $LASTEXITCODE
+        $mins = [math]::Round(((Get-Date) - $t0).TotalMinutes, 1)
+        Add-Log $log "== cmake build exit $code after $mins min"
+        if ($code -ne 0) { Write-Host "ERROR app build failed (exit $code) after $mins min, see $log"; exit 40 }
+    } finally {
+        Pop-Location
+    }
+    $exe = Join-Path $install 'bambu-studio.exe'
+    if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { Write-Host "ERROR build succeeded but $exe is missing, see $log"; exit 40 }
+    $vi = (Get-Item -LiteralPath $exe).VersionInfo
+    Write-Host "OK app: $exe (version $($vi.ProductMajorPart).$($vi.ProductMinorPart).$($vi.ProductBuildPart).$($vi.ProductPrivatePart), FileVersion $($vi.FileVersion)) built in $mins min"
+}
+
+function Invoke-Test {
+    $u = Get-Upstream
+    $want = $u['studio.tag_commit']
+    if ($want -notmatch '^[0-9a-f]{40}$') { throw 'upstream.toml: studio.tag_commit not set' }
+    $root = Get-BuildRoot
+    $src = Join-Path $root 'BambuStudio'
+    Assert-PatchedClone -Src $src -Commit $want
+    $prefix = Join-Path $root 'deps-out\usr\local'
+    $cmake = Enter-BuildToolchain -MinFreeGB (Get-StepMinFreeGB -Step test -Src $src)
+    $ctest = Join-Path (Split-Path $cmake -Parent) 'ctest.exe'
+    if (-not (Test-Path -LiteralPath $ctest -PathType Leaf)) { throw "ctest.exe not found next to $cmake" }
+    # The PR's legacy contract test is Python: it runs here, on the build machine only, never on the user's PC.
+    $python = Get-Command python.exe, py.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $python) { Write-Host 'ERROR Python not found (python.exe or py.exe): needed by tests/mcp/test_legacy_contract.py'; exit 45 }
+
+    $buildDir = Join-Path $src 'build-mcp-tests'
+    $log = Write-StepLog -Step 'test'
+    $configureArgs = @('-S', 'tests/mcp', '-B', 'build-mcp-tests', '-G', 'Visual Studio 17 2022', '-A', 'x64', "-DCMAKE_PREFIX_PATH=$prefix")
+    $buildArgs = @('--build', 'build-mcp-tests', '--config', 'Release', '--', '-m', '/v:minimal')
+    $ctestArgs = @('-C', 'Release', '--output-on-failure')
+    # Run as a script (it calls unittest.main()); 'python -m unittest <path>' would import it as package 'tests.mcp'.
+    $pyArgs = @('tests/mcp/test_legacy_contract.py', '-v')
+    Add-Log $log "== PATH=$env:Path"
+    Add-Log $log "== cwd $src"
+    Write-Host "Building and running the MCP standalone tests in $buildDir; log: $log"
+    Push-Location -LiteralPath $src
+    try {
+        Add-Log $log "== cmake configure: $(Format-CommandLine $cmake $configureArgs)"
+        & $cmake @configureArgs *>> $log
+        $code = $LASTEXITCODE; Add-Log $log "== cmake configure exit $code"
+        if ($code -ne 0) { Write-Host "ERROR MCP tests configure failed (exit $code), see $log"; exit 45 }
+        Add-Log $log "== cmake build: $(Format-CommandLine $cmake $buildArgs)"
+        & $cmake @buildArgs *>> $log
+        $code = $LASTEXITCODE; Add-Log $log "== cmake build exit $code"
+        if ($code -ne 0) { Write-Host "ERROR MCP tests build failed (exit $code), see $log"; exit 45 }
+        Push-Location -LiteralPath $buildDir
+        try {
+            Add-Log $log "== ctest: $(Format-CommandLine $ctest $ctestArgs)"
+            & $ctest @ctestArgs *>> $log
+            $code = $LASTEXITCODE
+        } finally { Pop-Location }
+        Add-Log $log "== ctest exit $code"
+        if ($code -ne 0) { Write-Host "ERROR ctest failed (exit $code), see $log"; exit 45 }
+        # The test pins the oracle's SHA-256 over its committed (LF) bytes, while the clone's work tree may have CRLF
+        # (core.autocrlf=true). Run it on an LF export of the index: the patched content exactly as applied.
+        $pyRoot = Join-Path $root ('tmp-legacy-contract-' + [guid]::NewGuid().ToString('N'))
+        $pyFiles = @('tests/mcp/test_legacy_contract.py', 'tests/mcp/legacy_tools_oracle.json', 'src/slic3r/GUI/McpToolsManifest.json')
+        try {
+            $out = & git -c core.autocrlf=false -C $src checkout-index "--prefix=$($pyRoot -replace '\\', '/')/" -- @pyFiles 2>&1
+            if ($LASTEXITCODE -ne 0) { Add-Log $log $out; Write-Host "ERROR git checkout-index of the legacy contract files failed, see $log"; exit 45 }
+            Push-Location -LiteralPath $pyRoot
+            try {
+                Add-Log $log "== cwd $pyRoot (LF export of the index: $($pyFiles -join ', '))"
+                Add-Log $log "== python: $(Format-CommandLine $python.Source $pyArgs)"
+                & $python.Source @pyArgs *>> $log
+                $code = $LASTEXITCODE
+            } finally { Pop-Location }
+        } finally {
+            Remove-Item -LiteralPath $pyRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        Add-Log $log "== python unittest exit $code"
+        if ($code -ne 0) { Write-Host "ERROR test_legacy_contract.py failed (exit $code), see $log"; exit 45 }
+    } finally {
+        Pop-Location
+    }
+    Write-Host "OK test: ctest and test_legacy_contract.py passed; log: $log"
+}
+
+function Invoke-Package {
+    $u = Get-Upstream
+    $version = $u['studio.version']; $patchId = $u['driver.patch_id']
+    if ($version -notmatch '^\d+(\.\d+){3}$') { throw "upstream.toml: studio.version invalid: '$version'" }
+    if ($patchId -notmatch '^[0-9a-f]{12}$') { throw "upstream.toml: driver.patch_id is not 12 hex: '$patchId'" }
+    $root = Get-BuildRoot
+    $install = Join-Path $root 'install-dir'
+    $exe = Join-Path $install 'bambu-studio.exe'
+    if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { Write-Host "ERROR $exe missing. Run driver/build.ps1 -Step app."; exit 50 }
+    $dir = Join-Path $root 'artifacts'
+    $name = "BambuStudio-bamburino-$version-$patchId-win64.zip"
+    $zip = Join-Path $dir $name
+    $tmp = "$zip.partial"
+    try {
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        foreach ($f in @($zip, "$zip.sha256", $tmp)) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force } }
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        # The contents of install-dir at the zip root (no enclosing folder).
+        [System.IO.Compression.ZipFile]::CreateFromDirectory($install, $tmp, [System.IO.Compression.CompressionLevel]::Optimal, $false)
+        Move-Item -LiteralPath $tmp -Destination $zip
+        $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+        # sha256sum format, so 'sha256sum -c' works next to the zip.
+        [System.IO.File]::WriteAllText("$zip.sha256", "$hash  $name`n", (New-Object System.Text.UTF8Encoding($false)))
+    } catch {
+        if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+        Write-Host "ERROR packaging failed: $($_.Exception.Message)"
+        exit 50
+    }
+    $mb = [math]::Round((Get-Item -LiteralPath $zip).Length / 1MB, 1)
+    Write-Host "OK package: $zip ($mb MB) sha256 $hash"
+}
+
+function Invoke-All {
+    # prereqs -> fetch (only when the clone is absent) -> patch -> deps -> app -> test -> package; each step runs in
+    # its own pwsh process (fresh environment), and the first non-zero exit code stops the chain and is propagated.
+    $root = Get-BuildRoot
+    $src = Join-Path $root 'BambuStudio'
+    $pwsh = (Get-Process -Id $PID).Path
+    # Free-disk threshold of the heaviest step that will do work: a first deps build (25) unless the deps sentinel is
+    # already there (deps is then a no-op, or a resume that the deps step checks itself), else the app build (12).
+    $sentinel = Join-Path $root 'deps-out\.bamburino-deps-key'
+    $minFree = if (Test-Path -LiteralPath $sentinel -PathType Leaf) { Get-StepMinFreeGB -Step app -Src $src } else { Get-StepMinFreeGB -Step deps -Src $src }
+    Write-Host "== all: prereqs (-MinFreeGB $minFree)"
+    & $pwsh -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot 'prereqs.ps1') -Check -MinFreeGB $minFree
+    if ($LASTEXITCODE -ne 0) { Write-Host "STOP all: prereqs exit $LASTEXITCODE"; exit $LASTEXITCODE }
+    $steps = @('patch', 'deps', 'app', 'test', 'package')
+    if (-not (Test-Path -LiteralPath $src)) { $steps = @('fetch') + $steps } else { Write-Host "== all: fetch skipped, $src exists" }
+    $t0 = Get-Date
+    foreach ($s in $steps) {
+        Write-Host "== all: $s"
+        & $pwsh -NoProfile -NonInteractive -File $PSCommandPath -Step $s
+        if ($LASTEXITCODE -ne 0) { Write-Host "STOP all: step $s exit $LASTEXITCODE"; exit $LASTEXITCODE }
+    }
+    Write-Host "OK all: $($steps -join ', ') in $([math]::Round(((Get-Date) - $t0).TotalMinutes, 1)) min"
+}
+
 switch ($Step) {
     'fetch' { Invoke-Fetch }
     'patch' { Invoke-Patch }
     'deps' { Invoke-Deps }
+    'app' { Invoke-App }
+    'test' { Invoke-Test }
+    'package' { Invoke-Package }
+    'all' { Invoke-All }
 }
 exit 0

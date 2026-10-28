@@ -30,13 +30,15 @@ if (($defs -join '|') -ne ($want -join '|')) { throw "Get-IdentityCMakeDefines r
 $appCall = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Get-IdentityCMakeDefines' }, $true)
 if (@($appCall).Count -lt 1) { throw 'driver/build.ps1 never calls Get-IdentityCMakeDefines' }
 
-# The last -Step app log, when one exists, shows both definitions on the CMake command line.
+# The last -Step app log shows both definitions on the CMake configure command line (the identity is not cached,
+# so every app configure must pass them).
 $logDir = Join-Path (Get-BuildRoot) 'logs'
 $appLog = if (Test-Path -LiteralPath $logDir) { Get-ChildItem -LiteralPath $logDir -Filter 'app-*.log' -File | Sort-Object Name | Select-Object -Last 1 } else { $null }
-if ($appLog) {
-    foreach ($d in $want) {
-        if (-not (Select-String -LiteralPath $appLog.FullName -SimpleMatch -Quiet -Pattern $d)) { throw "$($appLog.Name) lacks $d" }
-    }
+if (-not $appLog) { throw "no app-*.log in $logDir (run driver/build.ps1 -Step app)" }
+$cmdLine = @(Select-String -LiteralPath $appLog.FullName -SimpleMatch -Pattern '== cmake configure: ' | Select-Object -First 1)
+if ($cmdLine.Count -ne 1) { throw "$($appLog.Name) has no '== cmake configure: ' command line" }
+foreach ($d in $want) {
+    if (-not $cmdLine[0].Line.Contains($d)) { throw "$($appLog.Name) configure command line lacks $d" }
 }
 
 # Patch the clone, then inspect it.
