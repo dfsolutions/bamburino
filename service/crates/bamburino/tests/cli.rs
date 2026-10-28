@@ -102,6 +102,49 @@ fn run_with_config_dir_starts_and_answers_healthz() {
 }
 
 #[test]
+fn run_starts_with_invalid_allowed_dir() {
+    let port = free_port();
+    let dir = config_dir(port);
+    std::fs::write(
+        dir.path().join("config.toml"),
+        format!("listen_port = {port}\nallowed_dirs = ['Z:\\missing']\n"),
+    )
+    .unwrap();
+    let child = std::process::Command::new(cargo_bin("bamburino"))
+        .args(["--run", "--config-dir"])
+        .arg(dir.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut child = KillOnDrop(child);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let reply = loop {
+        if let Some(r) = http_get(port, "/healthz") {
+            break r;
+        }
+        assert!(Instant::now() < deadline, "server did not answer /healthz");
+        assert!(child.0.try_wait().unwrap().is_none(), "server exited early");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+    // Stop it and read what it logged on stderr.
+    let _ = child.0.kill();
+    let _ = child.0.wait();
+    let mut err = String::new();
+    child
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut err)
+        .unwrap();
+    assert!(err.contains("WARN"), "{err}");
+    assert!(err.contains("allowed_dirs: ignoring"), "{err}");
+    assert!(err.contains("missing"), "{err}");
+}
+
+#[test]
 fn service_flag_from_console_exits_2() {
     let out = bamburino().arg("--service").assert().failure().code(2);
     assert!(

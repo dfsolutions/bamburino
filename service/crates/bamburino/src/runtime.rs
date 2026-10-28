@@ -7,10 +7,11 @@ use std::time::Duration;
 
 use bamburino::acl::current_user_sid;
 use bamburino::config::{Config, ConfigDir};
-use bamburino::logging::init_logging_with_secrets;
+use bamburino::logging::{init_logging_with_secrets, redact};
 use bamburino::secrets::read_secret;
 use bamburino_core::detect::parse_driver_url;
 use bamburino_core::driver::http::{HttpDriverClient, HttpDriverConfig};
+use bamburino_core::pathguard::PathGuard;
 use bamburino_core::tools::{ToolConfig, Tools};
 use tracing_appender::non_blocking::WorkerGuard;
 
@@ -60,8 +61,12 @@ pub fn prepare(dir: &ConfigDir, to_stderr: bool) -> Result<Prepared, String> {
         secrets,
     )
     .map_err(|e| e.to_string())?;
-    for w in cfg.allowed_dir_warnings() {
-        tracing::warn!("{w}");
+    let (path_guard, excluded_roots) = PathGuard::new(cfg.allowed_dirs.clone());
+    for (root, why) in &excluded_roots {
+        tracing::warn!(
+            "allowed_dirs: ignoring {}: {why}",
+            redact(&root.display().to_string())
+        );
     }
 
     let token_present = driver_token.is_some();
@@ -81,7 +86,7 @@ pub fn prepare(dir: &ConfigDir, to_stderr: bool) -> Result<Prepared, String> {
     if let Err(e) = std::fs::create_dir_all(&export_dir) {
         tracing::warn!("cannot create {}: {e}", export_dir.display());
     }
-    let tools = Arc::new(Tools::new(
+    let tools = Tools::new(
         Arc::new(driver),
         Arc::new(WindowsProcessProbe),
         ToolConfig {
@@ -91,7 +96,9 @@ pub fn prepare(dir: &ConfigDir, to_stderr: bool) -> Result<Prepared, String> {
             token_present,
         },
         export_dir,
-    ));
+    );
+    tools.set_path_guard(path_guard);
+    let tools = Arc::new(tools);
     Ok(Prepared {
         cfg,
         client_token,

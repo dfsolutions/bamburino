@@ -6,6 +6,7 @@ pub mod catalog;
 pub mod detect;
 pub mod driver;
 pub mod errors;
+pub mod pathguard;
 pub mod revision;
 pub mod tools;
 pub mod validate;

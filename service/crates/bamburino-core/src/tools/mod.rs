@@ -48,6 +48,9 @@ pub struct Tools {
     pub(crate) jobs: std::sync::Mutex<std::collections::HashMap<String, u32>>,
     /// Directory the driver writes temporary G-code exports to (see `slice`).
     pub(crate) export_dir: std::path::PathBuf,
+    /// Directory allowlist for the tools that will take paths (none does in
+    /// the MVP); set once by the service at startup.
+    path_guard: std::sync::OnceLock<crate::pathguard::PathGuard>,
     /// Set by the first `start_poller` call.
     poller_started: std::sync::atomic::AtomicBool,
 }
@@ -90,8 +93,20 @@ impl Tools {
             write_lock: tokio::sync::Mutex::new(()),
             jobs: std::sync::Mutex::new(std::collections::HashMap::new()),
             export_dir,
+            path_guard: std::sync::OnceLock::new(),
             poller_started: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Installs the path allowlist (first call wins).
+    pub fn set_path_guard(&self, guard: crate::pathguard::PathGuard) {
+        let _ = self.path_guard.set(guard);
+    }
+
+    /// The path allowlist, if the service installed one. Every tool that
+    /// accepts a path must go through `PathGuard::check`.
+    pub fn path_guard(&self) -> Option<&crate::pathguard::PathGuard> {
+        self.path_guard.get()
     }
 
     /// Revision state, so the server can start the poller on it.
