@@ -9,3 +9,4 @@
 /catalog/upstream-src/
 __pycache__/
 /service/.cargo/config.toml
+/build/

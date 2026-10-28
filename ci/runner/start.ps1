@@ -2,7 +2,7 @@
 # Starts the runner in its own console window (interactive session). Stop it with ci/runner/stop.ps1
 # (closing the window with X leaves the runner 'online' on GitHub for about a minute). The runner never starts with Windows.
 [CmdletBinding()]
-param([string]$RunnerDir = 'D:\BambuBuild\runner')
+param([string]$RunnerDir = 'D:\GoogleAI\BAMBU-MCP\build\runner')
 $ErrorActionPreference = 'Stop'
 $run = Join-Path $RunnerDir 'run.cmd'
 if (-not (Test-Path -LiteralPath $run)) { throw "run.cmd not found in $RunnerDir; run ci/runner/register.ps1 first" }

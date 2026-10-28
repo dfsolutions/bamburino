@@ -60,7 +60,7 @@ function Get-BuildRoot {
     [OutputType([string])]
     param()
     if ($env:BAMBURINO_BUILD_ROOT) { return $env:BAMBURINO_BUILD_ROOT }
-    return 'D:\BambuBuild'
+    return 'D:\GoogleAI\BAMBU-MCP\build'
 }
 
 function Enter-VsEnv {

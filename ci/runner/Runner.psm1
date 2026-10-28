@@ -83,7 +83,7 @@ function Stop-Runner {
     # Stop the on-demand runner and wait until GitHub reports it offline. Returns $true only then.
     # All side effects are injectable so unit tests need no processes and no network.
     param(
-        [string]$PidFile = 'D:\BambuBuild\runner\.bamburino-runner.pid',
+        [string]$PidFile = 'D:\GoogleAI\BAMBU-MCP\build\runner\.bamburino-runner.pid',
         [string]$Name = 'federico-pc',
         [int]$GracefulSec = 20,
         [int]$OfflineSec = 90,

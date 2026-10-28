@@ -6,8 +6,8 @@
 param(
     [string]$Repo = 'dfsolutions/bamburino',
     [string]$Version = '2.338.0',
-    [string]$RunnerDir = 'D:\BambuBuild\runner',
-    [string]$WorkDir = 'D:\BambuBuild\runner\_work',
+    [string]$RunnerDir = 'D:\GoogleAI\BAMBU-MCP\build\runner',
+    [string]$WorkDir = 'D:\GoogleAI\BAMBU-MCP\build\runner\_work',
     [string]$Name = 'federico-pc',
     [string]$Labels = 'bamburino-win'
 )

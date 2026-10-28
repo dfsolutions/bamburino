@@ -1,7 +1,7 @@
 # Unit test for driver/build.ps1 -Step package (final review fixes): the identity guard on install-dir\BambuStudio.dll
 # and the AGPL-3.0 section 6 files at the zip root (SOURCE.txt, LICENSE, NOTICE.md, install-studio.ps1 when present).
 # Runs on temporary folders only: a fake install-dir of two small files, a copy of upstream.toml
-# (BAMBURINO_UPSTREAM_TOML) and a temporary build root (BAMBURINO_BUILD_ROOT). It never builds and never touches D:\BambuBuild.
+# (BAMBURINO_UPSTREAM_TOML) and a temporary build root (BAMBURINO_BUILD_ROOT). It never builds and never touches D:\GoogleAI\BAMBU-MCP\build.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module "$PSScriptRoot/../Upstream.psm1" -Force
