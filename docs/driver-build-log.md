@@ -146,3 +146,21 @@ The superseded `8bd194447b99` zip was removed. `pwsh tools/tests/run.ps1`: all 9
 21 GB.
 
 Fallback decision (plan A Task 10): not needed — the PR built on Windows within the 3-round budget; test program needed one extra, test-only round.
+
+Outcome: PR12485-OK (3 rounds + 1 test-program round)
+
+## 2026-10-28 - Final review fixes (no rebuild)
+
+- `-Step package` now refuses (exit 50) an `install-dir\BambuStudio.dll` without `bamburino.<patch_id>` for the
+  `patch_id` in `upstream.toml`, and adds `SOURCE.txt` (AGPL-3.0 section 6), `LICENSE` and `NOTICE.md` at the zip
+  root (`install-studio.ps1` too once `ci/install-studio.ps1` is on the branch). Covered by
+  `tools/tests/Package.Tests.ps1` on a fake build root. The zip in `D:\bb\artifacts` predates this change and does
+  not contain those files; the next real `-Step package` produces them.
+- `/nodeReuse:false` is passed to msbuild (after `--` for `cmake --build`, directly for the deps msbuild): it is an
+  msbuild switch, not a cmake flag. Not exercised yet (no rebuild); idle `MSBuild.exe /nodemode:1 /nodeReuse:true`
+  workers from the 08:52 build were still alive at the time of this change.
+- `pwsh tools/tests/run.ps1` runs the unit tests (`Upstream`, `Patch`, `Audit`, `Package`) always, and the
+  integration tests (`Apply`, `Identity`, `Snapshot`, `App`, `Deps`, `Prereqs`; they re-apply the patch set on
+  `D:\bb\BambuStudio` with `-Step patch` or read `D:\bb`) only with `-Integration` or when the clone exists. They
+  are refused while a build runs (`cmake.exe`, or an `MSBuild.exe` that is not an idle `/nodemode:` worker): exit 1
+  with `-Integration`, SKIP otherwise.

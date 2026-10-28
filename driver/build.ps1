@@ -23,7 +23,7 @@
                  in-process (Enter-VsEnv, then prereqs.ps1 -Check -Export, so the VS CMake comes first and Strawberry's
                  MinGW bin is off PATH), and in <clone>\deps\build it runs
                  cmake .. -G "Visual Studio 17 2022" -A x64 -DDESTDIR=<BuildRoot>\deps-out -DCMAKE_BUILD_TYPE=Release
-                 -DDEP_DEBUG=OFF, then msbuild /m ALL_BUILD.vcxproj /p:Configuration=Release /v:minimal, with the whole
+                 -DDEP_DEBUG=OFF, then msbuild /m ALL_BUILD.vcxproj /p:Configuration=Release /v:minimal /nodeReuse:false, with the whole
                  output in the step log. The sentinel is written only after both succeed. deps-out is not wiped on a
                  mismatch: deps\build keeps the ExternalProject stamps, so a re-run after a failure resumes there.
                  Touches only <clone>\deps\build (kept by -Step patch) and deps-out, never the rest of the clone.
@@ -34,7 +34,9 @@
                  -DCMAKE_PREFIX_PATH=<BuildRoot>\deps-out\usr\local -DCMAKE_INSTALL_PREFIX=<BuildRoot>\install-dir
                  -DCMAKE_BUILD_TYPE=Release -DWIN10SDK_PATH=<BAMBURINO_WIN10SDK_PATH> <Get-IdentityCMakeDefines>
                  -DPKG_CONFIG_EXECUTABLE=<PKG_CONFIG_EXECUTABLE from prereqs.ps1 -Export>
-                 then cmake --build . --target install --config Release -- -m /v:minimal. The configure command line
+                 then cmake --build . --target install --config Release -- -m /v:minimal /nodeReuse:false
+                 (/nodeReuse:false is an msbuild switch, not a cmake flag, so it goes after '--': no idle MSBuild
+                 worker nodes stay behind once the step ends). The configure command line
                  is written to the step log as '== cmake configure: ...'. Exit 40 when configure or build fails or
                  install-dir\bambu-studio.exe is missing afterwards.
     -Step test   PR #12485 standalone MCP tests: cmake -S tests/mcp -B build-mcp-tests (in the clone) against the deps
@@ -44,7 +46,13 @@
                  work tree may be CRLF). Python is needed on the build machine only. Exit 45 on any failure.
     -Step package  Zips the contents of <BuildRoot>\install-dir into
                  <BuildRoot>\artifacts\BambuStudio-bamburino-<studio.version>-<patch_id>-win64.zip and writes
-                 <zip>.sha256 (sha256sum format). Exit 50 on any failure (including a missing bambu-studio.exe).
+                 <zip>.sha256 (sha256sum format). Before zipping it checks that install-dir\BambuStudio.dll contains
+                 '<build_suffix_prefix>.<patch_id>' for the patch_id in upstream.toml (exit 50 otherwise: a stale or
+                 foreign build would get a misleading name). At the zip root it adds (tools/Package.psm1) SOURCE.txt
+                 (AGPL-3.0 section 6: Bamburino repo URL and commit, upstream.toml tag/tag_commit/patch_id, the
+                 driver/patches/*.diff list, the upstream Bambu Studio URL and tag), LICENSE and NOTICE.md from the
+                 repo root, and ci/install-studio.ps1 as install-studio.ps1 when this checkout has it.
+                 Exit 50 on any failure (including a missing bambu-studio.exe).
     -Step all    prereqs -> fetch -> patch -> deps -> app -> test -> package, each in its own pwsh process; fetch
                  runs only when the clone folder is absent. The prereqs check uses the app threshold (12 GB) when the
                  deps sentinel exists, else the deps one (Get-StepMinFreeGB). Stops at the first non-zero exit code and returns it.
@@ -72,6 +80,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot '..\tools\Upstream.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot '..\tools\Package.psm1') -Force
 
 function Invoke-Git {
     param([Parameter(ValueFromRemainingArguments)][string[]]$GitArgs)
@@ -286,7 +295,7 @@ function Invoke-Deps {
     New-Item -ItemType Directory -Force -Path $buildDir, $out | Out-Null
     $log = Write-StepLog -Step 'deps'
     $cmakeArgs = @('..', '-G', 'Visual Studio 17 2022', '-A', 'x64', "-DDESTDIR=$out", '-DCMAKE_BUILD_TYPE=Release', '-DDEP_DEBUG=OFF')
-    $msbuildArgs = @('/m', 'ALL_BUILD.vcxproj', '/p:Configuration=Release', '/v:minimal')
+    $msbuildArgs = @('/m', 'ALL_BUILD.vcxproj', '/p:Configuration=Release', '/v:minimal', '/nodeReuse:false')
     Add-Log $log "== deps tree $key (studio.tag_commit $want)"
     Add-Log $log "== prereqs.ps1 -MinFreeGB $minFree"
     Add-Log $log "== PATH=$env:Path"
@@ -374,7 +383,7 @@ function Invoke-App {
     if (-not $env:PKG_CONFIG_EXECUTABLE) { throw 'PKG_CONFIG_EXECUTABLE not set by prereqs.ps1 -Export' }
     $configureArgs += "-DPKG_CONFIG_EXECUTABLE=$env:PKG_CONFIG_EXECUTABLE"
     # /v:minimal keeps warnings and errors but not the per-file progress, so the log stays small on a full build.
-    $buildArgs = @('--build', '.', '--target', 'install', '--config', 'Release', '--', '-m', '/v:minimal')
+    $buildArgs = @('--build', '.', '--target', 'install', '--config', 'Release', '--', '-m', '/v:minimal', '/nodeReuse:false')
     Add-Log $log "== patch_id $($u['driver.patch_id']) on studio.tag_commit $want"
     Add-Log $log "== prereqs.ps1 -MinFreeGB $minFree"
     Add-Log $log "== PATH=$env:Path"
@@ -421,7 +430,7 @@ function Invoke-Test {
     $buildDir = Join-Path $src 'build-mcp-tests'
     $log = Write-StepLog -Step 'test'
     $configureArgs = @('-S', 'tests/mcp', '-B', 'build-mcp-tests', '-G', 'Visual Studio 17 2022', '-A', 'x64', "-DCMAKE_PREFIX_PATH=$prefix")
-    $buildArgs = @('--build', 'build-mcp-tests', '--config', 'Release', '--', '-m', '/v:minimal')
+    $buildArgs = @('--build', 'build-mcp-tests', '--config', 'Release', '--', '-m', '/v:minimal', '/nodeReuse:false')
     $ctestArgs = @('-C', 'Release', '--output-on-failure')
     # Run as a script (it calls unittest.main()); 'python -m unittest <path>' would import it as package 'tests.mcp'.
     $pyArgs = @('tests/mcp/test_legacy_contract.py', '-v')
@@ -480,7 +489,15 @@ function Invoke-Package {
     $install = Join-Path $root 'install-dir'
     $exe = Join-Path $install 'bambu-studio.exe'
     if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { Write-Host "ERROR $exe missing. Run driver/build.ps1 -Step app."; exit 50 }
+    # Identity guard: the zip is named after patch_id, so install-dir must hold the build of that patch_id.
+    $marker = Get-PackageMarker -Upstream $u
+    $dll = Join-Path $install 'BambuStudio.dll'
+    if (-not (Test-BinaryMarker -Path $dll -Marker $marker)) {
+        Write-Host "ERROR $dll does not contain '$marker' (driver.patch_id in upstream.toml): install-dir is missing, stale or from another patch set. Run driver/build.ps1 -Step app."
+        exit 50
+    }
     $dir = Join-Path $root 'artifacts'
+    $extras = Join-Path $root ('tmp-package-extras-' + [guid]::NewGuid().ToString('N'))
     $name = "BambuStudio-bamburino-$version-$patchId-win64.zip"
     $zip = Join-Path $dir $name
     $tmp = "$zip.partial"
@@ -490,6 +507,18 @@ function Invoke-Package {
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         # The contents of install-dir at the zip root (no enclosing folder).
         [System.IO.Compression.ZipFile]::CreateFromDirectory($install, $tmp, [System.IO.Compression.CompressionLevel]::Optimal, $false)
+        # AGPL-3.0 section 6: SOURCE.txt, LICENSE, NOTICE.md (and install-studio.ps1 when present) at the zip root.
+        $added = Write-PackageExtras -RepoRoot (Join-Path $PSScriptRoot '..') -Destination $extras -Upstream $u
+        foreach ($n in $added) {
+            if (Test-Path -LiteralPath (Join-Path $install $n)) { throw "install-dir already has $n; refusing to overwrite it in the zip" }
+        }
+        $archive = [System.IO.Compression.ZipFile]::Open($tmp, [System.IO.Compression.ZipArchiveMode]::Update)
+        try {
+            foreach ($n in $added) {
+                [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, (Join-Path $extras $n), $n, [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+            }
+        } finally { $archive.Dispose() }
+        Write-Host "Added at the zip root: $($added -join ', ')"
         Move-Item -LiteralPath $tmp -Destination $zip
         $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
         # sha256sum format, so 'sha256sum -c' works next to the zip.
@@ -498,6 +527,8 @@ function Invoke-Package {
         if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
         Write-Host "ERROR packaging failed: $($_.Exception.Message)"
         exit 50
+    } finally {
+        Remove-Item -LiteralPath $extras -Recurse -Force -ErrorAction SilentlyContinue
     }
     $mb = [math]::Round((Get-Item -LiteralPath $zip).Length / 1MB, 1)
     Write-Host "OK package: $zip ($mb MB) sha256 $hash"

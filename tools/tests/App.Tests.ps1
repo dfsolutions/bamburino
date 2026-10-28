@@ -32,11 +32,12 @@ $carrier = @(Get-ChildItem -LiteralPath $install -File | Where-Object { $_.Exten
     Where-Object { $latin1.GetString([System.IO.File]::ReadAllBytes($_.FullName)).Contains($suffix) })
 if ($carrier.Count -lt 1) { throw "no .exe/.dll in $install embeds '$suffix'" }
 
-# MCP standalone tests: the last -Step test log shows ctest at 100%.
+# MCP standalone tests: the last -Step test log shows ctest at 100% and test_legacy_contract.py exit 0.
 $logDir = Join-Path $root 'logs'
 $testLog = if (Test-Path -LiteralPath $logDir) { Get-ChildItem -LiteralPath $logDir -Filter 'test-*.log' -File | Sort-Object Name | Select-Object -Last 1 } else { $null }
 if (-not $testLog) { throw "no test-*.log in $logDir (run driver/build.ps1 -Step test)" }
 if (-not (Select-String -LiteralPath $testLog.FullName -SimpleMatch -Quiet -Pattern '100% tests passed')) { throw "$($testLog.Name) does not report '100% tests passed'" }
+if (-not (Select-String -LiteralPath $testLog.FullName -SimpleMatch -Quiet -Pattern '== python unittest exit 0')) { throw "$($testLog.Name) does not report '== python unittest exit 0' (test_legacy_contract.py)" }
 
 # Package: zip named after the upstream version and patch_id, with a sha256sum-style sidecar that matches.
 $zip = Join-Path $root "artifacts\BambuStudio-bamburino-$($u['studio.version'])-$patchId-win64.zip"
