@@ -301,6 +301,13 @@ impl State {
         out
     }
 
+    /// A test-setup edit of the scene: stales every issued plate revision and
+    /// invalidates the slice result, like any edit, without an undo step.
+    fn scene_changed(&mut self) {
+        self.epoch += 1;
+        self.invalidate_slice();
+    }
+
     fn shift_instances(&mut self, by: [f64; 3]) {
         for object in &mut self.objects {
             for instance in &mut object.instances {
@@ -552,9 +559,12 @@ impl MockDriver {
     }
 
     /// Number of plates the mock reports (default 1). Plate 0 is selected.
-    /// Resizes the plate list; new plates are unnamed and unlocked.
+    /// Resizes the plate list; new plates are unnamed and unlocked, instances
+    /// on removed plates move to the last one. A setup edit: it stales plate
+    /// revisions and the slice result, so read revisions AFTER it.
     pub fn set_plate_count(&self, count: u32) {
         let mut st = self.lock();
+        st.scene_changed();
         st.plates.resize(
             count.max(1) as usize,
             MockPlate {
@@ -562,14 +572,22 @@ impl MockDriver {
                 locked: false,
             },
         );
+        let last = st.plates.len() as i32 - 1;
+        for object in &mut st.objects {
+            for instance in &mut object.instances {
+                instance.plate_index = instance.plate_index.min(last);
+            }
+        }
         st.selected_plate = st.selected_plate.min(st.plate_count() - 1);
     }
 
     /// Adds a 20 mm cube with one instance `inst-<object_id>` (extruder 1) on
-    /// `plate_index`. A setup helper: no undo snapshot. Missing plates are
-    /// created.
+    /// `plate_index`. Missing plates are created. A setup edit: no undo step,
+    /// but it stales plate revisions and the slice result (it changes what
+    /// would be sliced), so read revisions AFTER it.
     pub fn add_object(&self, object_id: &str, name: &str, plate_index: u32) {
         let mut st = self.lock();
+        st.scene_changed();
         let needed = plate_index as usize + 1;
         if st.plates.len() < needed {
             let missing = needed - st.plates.len();
@@ -583,13 +601,14 @@ impl MockDriver {
         ));
     }
 
-    /// Adds another instance to an existing object on `plate_index` (setup
-    /// helper, no snapshot).
+    /// Adds another instance to an existing object on `plate_index`. Same
+    /// setup-edit semantics as [`Self::add_object`]: read revisions AFTER it.
     ///
     /// # Panics
     /// If `object_id` does not exist.
     pub fn add_instance(&self, object_id: &str, instance_id: &str, plate_index: u32) {
         let mut st = self.lock();
+        st.scene_changed();
         let needed = plate_index as usize + 1;
         if st.plates.len() < needed {
             let missing = needed - st.plates.len();
@@ -602,12 +621,14 @@ impl MockDriver {
         reindex(&mut st.objects);
     }
 
-    /// Writes the raw rotation of an instance (may hold `-0.0`).
+    /// Writes the raw rotation of an instance (may hold `-0.0`). Setup edit,
+    /// same semantics as [`Self::add_object`]: read revisions AFTER it.
     ///
     /// # Panics
     /// If the object or the instance does not exist.
     pub fn set_instance_rotation(&self, object_id: &str, instance_id: &str, deg: [f64; 3]) {
         let mut st = self.lock();
+        st.scene_changed();
         let pos = st.object_position(object_id).expect("mock object exists");
         let instance = st.objects[pos]
             .instances
@@ -617,27 +638,39 @@ impl MockDriver {
         instance.rotation_deg = deg;
     }
 
-    /// Replaces the project's filament slots (default: one "Mock PLA").
+    /// Replaces the project's filament slots (default: one "Mock PLA"). Setup
+    /// edit: stales plate revisions and the slice result; read revisions AFTER.
     pub fn set_filaments(&self, f: Vec<MockFilament>) {
-        self.lock().filaments = f;
+        let mut st = self.lock();
+        st.scene_changed();
+        st.filaments = f;
     }
 
-    /// Simulates the user locking a plate. No driver tool does it; it takes
-    /// no snapshot so tests can lock before or after reading a revision.
+    /// Simulates the user locking a plate. No driver tool does it. Like the
+    /// driver's `plate.lock` it takes an undo snapshot: the project revision
+    /// moves, plate revisions go stale and the slice result is invalidated.
     pub fn lock_plate(&self, index: u32, locked: bool) {
-        if let Some(plate) = self.lock().plates.get_mut(index as usize) {
-            plate.locked = locked;
+        let mut st = self.lock();
+        if (index as usize) < st.plates.len() {
+            st.take_snapshot();
+            st.plates[index as usize].locked = locked;
         }
     }
 
-    /// What `ams_inventory` answers (default `Absent`).
+    /// What `ams_inventory` answers (default `Absent`). Setup edit: stales
+    /// plate revisions and the slice result; read revisions AFTER it.
     pub fn set_ams(&self, ams: MockAms) {
-        self.lock().ams = ams;
+        let mut st = self.lock();
+        st.scene_changed();
+        st.ams = ams;
     }
 
-    /// What `device_list` answers (default none).
+    /// What `device_list` answers (default none). Setup edit, same semantics
+    /// as [`Self::set_ams`].
     pub fn set_devices(&self, d: Vec<DeviceSummary>) {
-        self.lock().devices = d;
+        let mut st = self.lock();
+        st.scene_changed();
+        st.devices = d;
     }
 
     /// What the next arrange jobs do (default `Shift([10, 0, 0])`).
@@ -1392,11 +1425,15 @@ impl DriverClient for MockDriver {
     ) -> Result<FilamentAssignment, DriverError> {
         let mut st = self.enter(DriverTool::FilamentAssign).await?;
         let o = st.object_position(object_id)?;
+        if st.objects[o]
+            .instances
+            .iter()
+            .any(|i| st.plate_is_locked(i.plate_index))
+        {
+            return Err(invalid("Unlock every plate containing the object first"));
+        }
         let Some(slot) = st.filaments.get(filament_index as usize) else {
-            return Err(invalid(&format!(
-                "filamentIndex {filament_index} out of range (project has {} filaments)",
-                st.filaments.len()
-            )));
+            return Err(invalid("Index is outside current state; list again"));
         };
         let preset = slot.preset.clone();
         st.take_snapshot();

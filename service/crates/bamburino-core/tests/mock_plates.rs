@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #![cfg(feature = "mock")]
 
-use std::collections::BTreeMap;
-
 use bamburino_core::driver::mock::{MockAms, MockArrange, MockDriver, MockFilament};
 use bamburino_core::driver::{
     AmsTray, AmsUnit, DeviceSummary, DriverClient, DriverError, JobStatus, PlateContents,
@@ -90,7 +88,7 @@ async fn plate_delete_refusals_use_the_driver_messages() {
         .unwrap_err();
     invalid(err, "Unlock the plate");
 
-    // Move to a non-empty target, then to a locked one.
+    // Same-plate move first, then a non-empty target, then a locked one.
     let err = m
         .plate_delete(0, &rev, PlateContents::Move, Some(0))
         .await
@@ -253,6 +251,10 @@ async fn arrange_job_needs_two_polls_and_shifts_instances() {
     m.set_arrange(MockArrange::Shift([10.0, 5.0, 0.0]));
     let result = slice_selected(&m).await;
     assert!(m.slice_state().await.unwrap().valid);
+    assert_eq!(
+        m.slice_state().await.unwrap().slice_result_id.as_deref(),
+        Some(result.as_str())
+    );
     let before = undo_snapshot(&m).await;
     let pos0 = m.model_list().await.unwrap()[0].instances[0].position_mm;
 
@@ -273,7 +275,7 @@ async fn arrange_job_needs_two_polls_and_shifts_instances() {
     let pos1 = m.model_list().await.unwrap()[0].instances[0].position_mm;
     assert_eq!(pos1, [pos0[0] + 10.0, pos0[1] + 5.0, pos0[2]]);
     assert!(!m.slice_state().await.unwrap().valid);
-    let _ = result;
+    assert_eq!(m.slice_state().await.unwrap().slice_result_id, None);
 }
 
 #[tokio::test]
@@ -463,8 +465,6 @@ async fn existing_single_cube_behaviour_is_unchanged() {
     assert_eq!(objects[0].instances[0].plate_index, 0);
     assert_eq!(m.extruder_of("obj-1"), 1);
     assert_eq!(m.active_presets().await.unwrap().filaments, ["Mock PLA"]);
-    let keys: BTreeMap<String, String> = BTreeMap::new();
-    let _ = keys;
 }
 
 #[tokio::test]
@@ -488,4 +488,68 @@ async fn added_objects_and_raw_rotation() {
             ("obj-2".to_string(), "inst-extra".to_string())
         ]
     );
+}
+
+#[tokio::test]
+async fn setup_edits_stale_revisions_and_invalidate_the_slice() {
+    let m = MockDriver::new();
+    m.set_plate_count(2);
+    type Setup = Box<dyn Fn(&MockDriver)>;
+    let edits: Vec<(&str, Setup)> = vec![
+        ("lock_plate", Box::new(|m| m.lock_plate(1, true))),
+        ("add_object", Box::new(|m| m.add_object("o", "o", 1))),
+        (
+            "add_instance",
+            Box::new(|m| m.add_instance("obj-1", "i2", 1)),
+        ),
+        (
+            "set_instance_rotation",
+            Box::new(|m| m.set_instance_rotation("obj-1", "inst-1", [0.0, 0.0, 5.0])),
+        ),
+        (
+            "set_filaments",
+            Box::new(|m| m.set_filaments(vec![filament("A", "PLA", None)])),
+        ),
+        ("set_ams", Box::new(|m| m.set_ams(MockAms::Offline))),
+        ("set_devices", Box::new(|m| m.set_devices(Vec::new()))),
+        ("set_plate_count", Box::new(|m| m.set_plate_count(3))),
+    ];
+    for (name, edit) in edits {
+        slice_selected(&m).await;
+        let rev = m.plate_list().await.unwrap().plate_revision;
+        edit(&m);
+        assert!(
+            matches!(
+                m.plate_rename(0, &rev, "x").await,
+                Err(DriverError::StaleReference { .. })
+            ),
+            "{name} left the plate revision valid"
+        );
+        assert!(!m.slice_state().await.unwrap().valid, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn filament_assign_refuses_objects_on_locked_plates_with_the_driver_text() {
+    let m = MockDriver::new();
+    m.lock_plate(0, true);
+    invalid(
+        m.filament_assign("obj-1", 0).await.unwrap_err(),
+        "Unlock every plate containing the object first",
+    );
+    m.lock_plate(0, false);
+    invalid(
+        m.filament_assign("obj-1", 5).await.unwrap_err(),
+        "Index is outside current state; list again",
+    );
+    assert!(m.assigned_filament_indices().is_empty());
+}
+
+#[tokio::test]
+async fn shrinking_the_plate_count_moves_orphans_to_the_last_plate() {
+    let m = MockDriver::new();
+    m.add_object("far", "far", 3);
+    m.set_plate_count(2);
+    assert!(m.instances_on_plate(3).is_empty());
+    assert_eq!(m.instances_on_plate(1).len(), 1);
 }
