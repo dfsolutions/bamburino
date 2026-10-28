@@ -269,16 +269,7 @@ fn sddl_problem(sddl: &str, owner_sid: &str) -> Option<String> {
     if !dacl.starts_with('P') {
         return Some("its DACL is not protected".to_owned());
     }
-    let canon = |t: &str| match t {
-        "S-1-5-18" => "SY".to_owned(),
-        "S-1-5-32-544" => "BA".to_owned(),
-        "S-1-5-19" => "LS".to_owned(),
-        "S-1-1-0" => "WD".to_owned(),
-        "S-1-5-32-545" => "BU".to_owned(),
-        "S-1-5-11" => "AU".to_owned(),
-        "S-1-5-4" => "IU".to_owned(),
-        other => other.to_owned(),
-    };
+    let canon = crate::secure::canonical_trustee;
     // Each ACE reads `(type;flags;rights;;;trustee)`.
     let trustees: Vec<String> = dacl
         .split('(')

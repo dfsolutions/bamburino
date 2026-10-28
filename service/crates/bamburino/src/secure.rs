@@ -25,6 +25,38 @@ pub fn root_sddl(owner_sid: &str) -> String {
     format!("O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;LS)(A;OICI;FRFX;;;{owner_sid})")
 }
 
+/// Canonical form of an SDDL trustee: well-known SIDs map to their two-letter
+/// alias, as Windows prints them, and the RID-500/501 accounts of a domain
+/// SID (`S-1-5-21-a-b-c-500`) map to `LA`/`LG` (the built-in Administrator
+/// and Guest). Anything else is returned unchanged, so unknown trustees never
+/// compare equal to a well-known one (fail closed).
+pub fn canonical_trustee(t: &str) -> String {
+    match t {
+        "S-1-5-18" => return "SY".to_owned(),
+        "S-1-5-32-544" => return "BA".to_owned(),
+        "S-1-5-19" => return "LS".to_owned(),
+        "S-1-5-32-545" => return "BU".to_owned(),
+        "S-1-1-0" => return "WD".to_owned(),
+        "S-1-5-11" => return "AU".to_owned(),
+        "S-1-5-4" => return "IU".to_owned(),
+        _ => {}
+    }
+    if let Some(rest) = t.strip_prefix("S-1-5-21-") {
+        let parts: Vec<&str> = rest.split('-').collect();
+        let numeric = parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+        if numeric && parts.len() == 4 {
+            match parts[3] {
+                "500" => return "LA".to_owned(),
+                "501" => return "LG".to_owned(),
+                _ => {}
+            }
+        }
+    }
+    t.to_owned()
+}
+
 fn check_sid(sid: &str) -> io::Result<()> {
     if valid_sid(sid) {
         Ok(())
@@ -274,5 +306,48 @@ mod win {
         // SAFETY: allocated by GetNamedSecurityInfoW.
         unsafe { LocalFree(sd) };
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonical_trustee as c;
+
+    #[test]
+    fn well_known_sids_map_to_aliases() {
+        for (sid, alias) in [
+            ("S-1-5-18", "SY"),
+            ("S-1-5-32-544", "BA"),
+            ("S-1-5-19", "LS"),
+            ("S-1-5-32-545", "BU"),
+            ("S-1-1-0", "WD"),
+            ("S-1-5-11", "AU"),
+            ("S-1-5-4", "IU"),
+        ] {
+            assert_eq!(c(sid), alias);
+            assert_eq!(c(alias), alias);
+        }
+    }
+
+    #[test]
+    fn builtin_administrator_and_guest_map_to_la_and_lg() {
+        assert_eq!(c("S-1-5-21-3776380004-1005456608-3524014338-500"), "LA");
+        assert_eq!(c("S-1-5-21-3776380004-1005456608-3524014338-501"), "LG");
+        assert_eq!(c("LA"), "LA");
+    }
+
+    #[test]
+    fn other_trustees_are_unchanged() {
+        for s in [
+            "S-1-5-21-1-2-3-1001",
+            "S-1-5-21-1-2-3-5000",
+            "S-1-5-21-1-2-500",
+            "S-1-5-21-1-2-3-4-500",
+            "S-1-5-21-a-2-3-500",
+            "S-1-5-32-500",
+            "",
+        ] {
+            assert_eq!(c(s), s);
+        }
     }
 }

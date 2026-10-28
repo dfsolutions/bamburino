@@ -5,6 +5,8 @@ use bamburino::config::{Config, ConfigDir, ConfigError};
 use bamburino::secrets::{
     generate_token, read_driver_token_from_stdin, read_secret, write_secret_atomic,
 };
+#[cfg(windows)]
+use bamburino::secure::canonical_trustee;
 
 fn sid() -> String {
     bamburino::acl::current_user_sid().unwrap()
@@ -193,8 +195,14 @@ fn acl_grants_only_expected_principals() {
         .iter()
         .map(|a| a.rsplit(';').next().unwrap().to_owned())
         .collect();
+    trustees = trustees.iter().map(|t| canonical_trustee(t)).collect();
     trustees.sort();
-    let mut expected = vec!["SY".to_owned(), "BA".to_owned(), "LS".to_owned(), sid];
+    let mut expected = vec![
+        "SY".to_owned(),
+        "BA".to_owned(),
+        "LS".to_owned(),
+        canonical_trustee(&sid),
+    ];
     expected.sort();
     assert_eq!(trustees, expected, "{sddl}");
     assert!(aces.iter().all(|a| a.starts_with("A;")), "{sddl}");
@@ -238,7 +246,10 @@ fn secret_temp_file_is_restricted_before_first_write() {
     let aces: Vec<&str> = sddl.split('(').skip(1).collect();
     assert_eq!(aces.len(), 4, "{sddl}");
     assert!(sddl.contains(";;;SY)") && sddl.contains(";;;BA)") && sddl.contains(";;;LS)"));
-    assert!(sddl.contains(&format!(";;;{sid})")), "{sddl}");
+    assert!(
+        sddl.contains(&format!(";;;{})", canonical_trustee(&sid))),
+        "{sddl}"
+    );
     assert!(!sddl.contains(";;;WD") && !sddl.contains(";;;BU"), "{sddl}");
     // Exclusive share mode: nobody can open it for reading meanwhile.
     assert!(std::fs::File::open(&temp_path).is_err());
@@ -312,8 +323,14 @@ fn root_sddl_dacl_is_protected_and_minimal() {
                 .to_owned()
         })
         .collect();
+    trustees = trustees.iter().map(|t| canonical_trustee(t)).collect();
     trustees.sort();
-    let mut want = vec!["SY".to_owned(), "BA".to_owned(), "LS".to_owned(), me];
+    let mut want = vec![
+        "SY".to_owned(),
+        "BA".to_owned(),
+        "LS".to_owned(),
+        canonical_trustee(&me),
+    ];
     want.sort();
     assert_eq!(trustees, want, "{got}");
     assert!(got.contains("D:P") && got.contains("OICI"), "{got}");
@@ -338,7 +355,7 @@ fn tmp_dir_dacl_gives_user_and_service_modify() {
     apply_acl(&d, &me, OwnerAccess::Modify).unwrap();
     let got = security_sddl(&d).unwrap();
     assert!(got.contains("D:P"), "{got}");
-    for t in ["LS", &me] {
+    for t in ["LS".to_owned(), canonical_trustee(&me)] {
         let ace = got
             .split('(')
             .find(|a| a.trim_end_matches(')').ends_with(&format!(";{t}")))
