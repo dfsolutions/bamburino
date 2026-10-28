@@ -19,7 +19,8 @@ use super::{
     ModelObject, Plate, PlateList, SettingSource, SettingsTarget, SliceState, SliceSummary,
 };
 use super::{
-    AmsInventory, DeviceSummary, ExportedPlate, FilamentAssignment, PlateContents, PlateDeleted,
+    AmsInventory, AmsUnit, DeviceSummary, ExportedPlate, FilamentAssignment, PlateContents,
+    PlateDeleted,
 };
 use crate::build_info;
 use crate::catalog::{Catalog, OptionKind};
@@ -28,6 +29,71 @@ use crate::catalog::{Catalog, OptionKind};
 const READ_ONLY_KEYS: [&str; 1] = ["ironing_type"];
 const OBJECT_ID: &str = "obj-1";
 const INSTANCE_ID: &str = "inst-1";
+/// Edge of the cube every mock object has, in millimetres.
+const CUBE_MM: f64 = 20.0;
+/// What `MockArrange::ShiftAndSwapPlates` moves every instance by.
+const SWAP_SHIFT_MM: [f64; 3] = [10.0, 0.0, 0.0];
+/// Magic bytes of the zip container every written 3MF starts with.
+const ZIP_MAGIC: &[u8] = b"PK\x03\x04";
+
+/// One filament slot of the mock project (what the driver reads from the
+/// project's `filament_settings_id`, `filament_type` and `filament_colour`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MockFilament {
+    pub preset: String,
+    pub material: String,
+    /// `None` is an empty segment in the serialized `filament_colour` list.
+    pub colour: Option<String>,
+}
+
+/// What `ams_inventory` reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MockAms {
+    /// The device answers but has no AMS: an inventory without units.
+    Absent,
+    /// The device is not reachable: `StaleReference`, like an unknown device.
+    Offline,
+    Units(Vec<AmsUnit>),
+}
+
+/// What the next arrange job does when it completes (second poll).
+#[derive(Debug, Clone, PartialEq)]
+pub enum MockArrange {
+    /// Every instance moves by this vector.
+    Shift([f64; 3]),
+    /// Every instance moves by `[10, 0, 0]` and the contents of plates 0 and 1
+    /// trade places (the arrange reshuffles plates, spec risk 1).
+    ShiftAndSwapPlates,
+    /// The job ends `Failed` with this message as a plain string error.
+    Fail(String),
+}
+
+#[derive(Clone)]
+struct MockObject {
+    id: String,
+    name: String,
+    instances: Vec<Instance>,
+    /// 1-based extruder, as `filament_assign` writes it.
+    extruder: u32,
+    /// True once `filament_assign` wrote the key (source `Object`).
+    extruder_assigned: bool,
+}
+
+#[derive(Clone)]
+struct MockPlate {
+    /// Empty = unnamed: reported as `Plate <index + 1>`.
+    name: String,
+    locked: bool,
+}
+
+fn unnamed_plates(count: usize) -> Vec<MockPlate> {
+    (0..count)
+        .map(|_| MockPlate {
+            name: String::new(),
+            locked: false,
+        })
+        .collect()
+}
 
 #[derive(Clone)]
 struct Snapshot {
@@ -36,7 +102,8 @@ struct Snapshot {
     settings: BTreeMap<String, String>,
     plate_overrides: BTreeMap<String, String>,
     object_overrides: BTreeMap<String, String>,
-    instance: Instance,
+    objects: Vec<MockObject>,
+    plates: Vec<MockPlate>,
 }
 
 #[derive(Default)]
@@ -46,8 +113,15 @@ struct SummaryStats {
     support_volume_mm3: Option<f64>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JobKind {
+    Slice,
+    Arrange,
+}
+
 struct Job {
     job: DriverJob,
+    kind: JobKind,
 }
 
 struct State {
@@ -66,8 +140,10 @@ struct State {
     settings: BTreeMap<String, String>,
     plate_overrides: BTreeMap<String, String>,
     object_overrides: BTreeMap<String, String>,
-    instance: Instance,
+    objects: Vec<MockObject>,
+    filaments: Vec<MockFilament>,
     dirty: bool,
+    project_path: String,
     // undo
     snapshots: Vec<Snapshot>,
     /// Like `UndoRedo::StackImpl`: `current_time` only grows, `active_time`
@@ -87,8 +163,15 @@ struct State {
     summary_stats: SummaryStats,
     estimated_time_s: Option<f64>,
     // plates
-    plate_count: u32,
+    plates: Vec<MockPlate>,
     selected_plate: u32,
+    // devices, arrange, files
+    ams: MockAms,
+    devices: Vec<DeviceSummary>,
+    arrange: MockArrange,
+    write_files: bool,
+    assigned_indices: Vec<u32>,
+    overwrite_flags: Vec<bool>,
     // export_gcode
     gcode_header: bool,
     exported: Vec<PathBuf>,
@@ -125,27 +208,130 @@ fn default_string(key: &str) -> String {
     }
 }
 
-fn cube_instance() -> Instance {
+fn cube_instance(id: &str, plate_index: u32) -> Instance {
     Instance {
-        id: INSTANCE_ID.to_string(),
+        id: id.to_string(),
         index: 0,
         position_mm: [128.0, 128.0, 10.0],
         rotation_deg: [0.0; 3],
         scale: [1.0; 3],
-        plate_index: 0,
+        plate_index: plate_index as i32,
     }
 }
 
-impl State {
-    fn object(&self) -> ModelObject {
-        let s = self.instance.scale;
-        ModelObject {
-            id: OBJECT_ID.to_string(),
-            index: 0,
-            name: "cube".to_string(),
-            dimensions_mm: [20.0 * s[0], 20.0 * s[1], 20.0 * s[2]],
-            instances: vec![self.instance.clone()],
+fn cube_object(id: &str, name: &str, instance_id: &str, plate_index: u32) -> MockObject {
+    MockObject {
+        id: id.to_string(),
+        name: name.to_string(),
+        instances: vec![cube_instance(instance_id, plate_index)],
+        extruder: 1,
+        extruder_assigned: false,
+    }
+}
+
+fn invalid(message: &str) -> DriverError {
+    DriverError::InvalidParams {
+        message: message.to_string(),
+    }
+}
+
+fn unknown_object(object_id: &str) -> DriverError {
+    DriverError::StaleReference {
+        message: format!("unknown object {object_id}"),
+    }
+}
+
+/// Re-indexes the instances of every object after an edit.
+fn reindex(objects: &mut [MockObject]) {
+    for object in objects {
+        for (i, instance) in object.instances.iter_mut().enumerate() {
+            instance.index = i as u32;
         }
+    }
+}
+
+/// What both file writers put on disk: a zip header and a marker.
+fn mock_3mf(what: &str) -> Vec<u8> {
+    let mut bytes = ZIP_MAGIC.to_vec();
+    bytes.extend_from_slice(format!("bamburino mock {what}").as_bytes());
+    bytes
+}
+
+fn write_file(path: &Path, bytes: &[u8]) -> Result<(), DriverError> {
+    std::fs::write(path, bytes).map_err(|e| DriverError::Native {
+        code: "NATIVE_ERROR".to_string(),
+        message: e.to_string(),
+    })
+}
+
+impl State {
+    fn object_view(&self, index: usize) -> ModelObject {
+        let object = &self.objects[index];
+        let s = object.instances.first().map_or([1.0; 3], |i| i.scale);
+        ModelObject {
+            id: object.id.clone(),
+            index: index as u32,
+            name: object.name.clone(),
+            dimensions_mm: [CUBE_MM * s[0], CUBE_MM * s[1], CUBE_MM * s[2]],
+            instances: object.instances.clone(),
+        }
+    }
+
+    fn object_position(&self, object_id: &str) -> Result<usize, DriverError> {
+        self.objects
+            .iter()
+            .position(|o| o.id == object_id)
+            .ok_or_else(|| unknown_object(object_id))
+    }
+
+    fn plate_count(&self) -> u32 {
+        self.plates.len() as u32
+    }
+
+    /// `(object position, instance position)` of every instance on a plate.
+    fn instances_on(&self, plate: u32) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for (o, object) in self.objects.iter().enumerate() {
+            for (i, instance) in object.instances.iter().enumerate() {
+                if instance.plate_index == plate as i32 {
+                    out.push((o, i));
+                }
+            }
+        }
+        out
+    }
+
+    fn shift_instances(&mut self, by: [f64; 3]) {
+        for object in &mut self.objects {
+            for instance in &mut object.instances {
+                for (axis, delta) in by.iter().enumerate() {
+                    instance.position_mm[axis] += delta;
+                }
+            }
+        }
+    }
+
+    fn plate_is_locked(&self, plate: i32) -> bool {
+        usize::try_from(plate)
+            .ok()
+            .and_then(|p| self.plates.get(p))
+            .is_some_and(|p| p.locked)
+    }
+
+    fn colour_list(&self) -> String {
+        self.filaments
+            .iter()
+            .map(|f| f.colour.clone().unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join(";")
+    }
+
+    fn type_list(&self) -> String {
+        self.filaments
+            .iter()
+            .map(|f| f.material.as_str())
+            .collect::<Vec<_>>()
+            .join(";")
     }
 
     fn slicing_running(&self) -> bool {
@@ -172,11 +358,18 @@ impl State {
         let revision = format!("mock-session:{}", self.revision_counter);
         self.issued.insert(revision.clone(), self.epoch);
         PlateList {
-            plates: (0..self.plate_count)
-                .map(|index| Plate {
-                    index,
-                    name: format!("Plate {}", index + 1),
-                    locked: false,
+            plates: self
+                .plates
+                .iter()
+                .enumerate()
+                .map(|(index, plate)| Plate {
+                    index: index as u32,
+                    name: if plate.name.is_empty() {
+                        format!("Plate {}", index + 1)
+                    } else {
+                        plate.name.clone()
+                    },
+                    locked: plate.locked,
                 })
                 .collect(),
             selected_index: self.selected_plate,
@@ -192,7 +385,8 @@ impl State {
             settings: self.settings.clone(),
             plate_overrides: self.plate_overrides.clone(),
             object_overrides: self.object_overrides.clone(),
-            instance: self.instance.clone(),
+            objects: self.objects.clone(),
+            plates: self.plates.clone(),
         });
         // `m_active_snapshot_time = ++m_current_time`: after an undo the new
         // snapshot jumps over the undone ones.
@@ -217,7 +411,7 @@ impl State {
     }
 
     fn check_plate(&self, index: u32) -> Result<(), DriverError> {
-        if index < self.plate_count {
+        if index < self.plate_count() {
             Ok(())
         } else {
             Err(DriverError::InvalidParams {
@@ -265,8 +459,14 @@ impl MockDriver {
                 settings,
                 plate_overrides: BTreeMap::new(),
                 object_overrides: BTreeMap::new(),
-                instance: cube_instance(),
+                objects: vec![cube_object(OBJECT_ID, "cube", INSTANCE_ID, 0)],
+                filaments: vec![MockFilament {
+                    preset: "Mock PLA".to_string(),
+                    material: "PLA".to_string(),
+                    colour: Some("#00AE42".to_string()),
+                }],
                 dirty: false,
+                project_path: String::new(),
                 snapshots: Vec::new(),
                 current_time: 0,
                 active_time: 0,
@@ -279,8 +479,14 @@ impl MockDriver {
                 valid_result: None,
                 summary_stats: SummaryStats::default(),
                 estimated_time_s: Some(1800.0),
-                plate_count: 1,
+                plates: unnamed_plates(1),
                 selected_plate: 0,
+                ams: MockAms::Absent,
+                devices: Vec::new(),
+                arrange: MockArrange::Shift([10.0, 0.0, 0.0]),
+                write_files: true,
+                assigned_indices: Vec::new(),
+                overwrite_flags: Vec::new(),
                 gcode_header: true,
                 exported: Vec::new(),
                 export_counter: 0,
@@ -313,7 +519,9 @@ impl MockDriver {
             st.settings = snap.settings;
             st.plate_overrides = snap.plate_overrides;
             st.object_overrides = snap.object_overrides;
-            st.instance = snap.instance;
+            st.objects = snap.objects;
+            st.plates = snap.plates;
+            st.selected_plate = st.selected_plate.min(st.plate_count() - 1);
             // Undo moves the active time back to the restored snapshot; the
             // current time is not decremented.
             st.active_time = snap.time;
@@ -344,8 +552,137 @@ impl MockDriver {
     }
 
     /// Number of plates the mock reports (default 1). Plate 0 is selected.
+    /// Resizes the plate list; new plates are unnamed and unlocked.
     pub fn set_plate_count(&self, count: u32) {
-        self.lock().plate_count = count.max(1);
+        let mut st = self.lock();
+        st.plates.resize(
+            count.max(1) as usize,
+            MockPlate {
+                name: String::new(),
+                locked: false,
+            },
+        );
+        st.selected_plate = st.selected_plate.min(st.plate_count() - 1);
+    }
+
+    /// Adds a 20 mm cube with one instance `inst-<object_id>` (extruder 1) on
+    /// `plate_index`. A setup helper: no undo snapshot. Missing plates are
+    /// created.
+    pub fn add_object(&self, object_id: &str, name: &str, plate_index: u32) {
+        let mut st = self.lock();
+        let needed = plate_index as usize + 1;
+        if st.plates.len() < needed {
+            let missing = needed - st.plates.len();
+            st.plates.extend(unnamed_plates(missing));
+        }
+        st.objects.push(cube_object(
+            object_id,
+            name,
+            &format!("inst-{object_id}"),
+            plate_index,
+        ));
+    }
+
+    /// Adds another instance to an existing object on `plate_index` (setup
+    /// helper, no snapshot).
+    ///
+    /// # Panics
+    /// If `object_id` does not exist.
+    pub fn add_instance(&self, object_id: &str, instance_id: &str, plate_index: u32) {
+        let mut st = self.lock();
+        let needed = plate_index as usize + 1;
+        if st.plates.len() < needed {
+            let missing = needed - st.plates.len();
+            st.plates.extend(unnamed_plates(missing));
+        }
+        let pos = st.object_position(object_id).expect("mock object exists");
+        st.objects[pos]
+            .instances
+            .push(cube_instance(instance_id, plate_index));
+        reindex(&mut st.objects);
+    }
+
+    /// Writes the raw rotation of an instance (may hold `-0.0`).
+    ///
+    /// # Panics
+    /// If the object or the instance does not exist.
+    pub fn set_instance_rotation(&self, object_id: &str, instance_id: &str, deg: [f64; 3]) {
+        let mut st = self.lock();
+        let pos = st.object_position(object_id).expect("mock object exists");
+        let instance = st.objects[pos]
+            .instances
+            .iter_mut()
+            .find(|i| i.id == instance_id)
+            .expect("mock instance exists");
+        instance.rotation_deg = deg;
+    }
+
+    /// Replaces the project's filament slots (default: one "Mock PLA").
+    pub fn set_filaments(&self, f: Vec<MockFilament>) {
+        self.lock().filaments = f;
+    }
+
+    /// Simulates the user locking a plate. No driver tool does it; it takes
+    /// no snapshot so tests can lock before or after reading a revision.
+    pub fn lock_plate(&self, index: u32, locked: bool) {
+        if let Some(plate) = self.lock().plates.get_mut(index as usize) {
+            plate.locked = locked;
+        }
+    }
+
+    /// What `ams_inventory` answers (default `Absent`).
+    pub fn set_ams(&self, ams: MockAms) {
+        self.lock().ams = ams;
+    }
+
+    /// What `device_list` answers (default none).
+    pub fn set_devices(&self, d: Vec<DeviceSummary>) {
+        self.lock().devices = d;
+    }
+
+    /// What the next arrange jobs do (default `Shift([10, 0, 0])`).
+    pub fn set_arrange(&self, a: MockArrange) {
+        self.lock().arrange = a;
+    }
+
+    /// False: `project_save` and `export_sliced_3mf` succeed but write nothing.
+    pub fn set_write_files(&self, on: bool) {
+        self.lock().write_files = on;
+    }
+
+    /// `(object_id, instance_id)` of every instance on a plate.
+    pub fn instances_on_plate(&self, index: u32) -> Vec<(String, String)> {
+        let st = self.lock();
+        st.instances_on(index)
+            .into_iter()
+            .map(|(o, i)| {
+                (
+                    st.objects[o].id.clone(),
+                    st.objects[o].instances[i].id.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// 1-based extruder of an object, what `filament_assign` wrote.
+    ///
+    /// # Panics
+    /// If the object does not exist.
+    pub fn extruder_of(&self, object_id: &str) -> u32 {
+        let st = self.lock();
+        let pos = st.object_position(object_id).expect("mock object exists");
+        st.objects[pos].extruder
+    }
+
+    /// Every (accepted) `filamentIndex` `filament_assign` received, 0-based.
+    pub fn assigned_filament_indices(&self) -> Vec<u32> {
+        self.lock().assigned_indices.clone()
+    }
+
+    /// The `overwrite` value of every `project_save` / `export_sliced_3mf`
+    /// received, refused calls included.
+    pub fn file_overwrite_flags(&self) -> Vec<bool> {
+        self.lock().overwrite_flags.clone()
     }
 
     /// Whether the exported G-code carries the Bambu header with the filament
@@ -472,15 +809,19 @@ impl DriverClient for MockDriver {
         Ok(AppState {
             session_id: st.session_id.clone(),
             app_version: st.app_version.clone(),
-            project_name: "Untitled".to_string(),
-            project_path: String::new(),
+            project_name: Path::new(&st.project_path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Untitled")
+                .to_string(),
+            project_path: st.project_path.clone(),
             dirty: st.dirty,
             presets_dirty: st.dirty,
             ui_job_running: false,
             slicing_running: st.slicing_running(),
             modal_open: st.modal_open,
-            object_count: 1,
-            plate_count: st.plate_count,
+            object_count: st.objects.len() as u32,
+            plate_count: st.plate_count(),
             selected_plate_index: st.selected_plate,
             undo_snapshot: st
                 .undo_snapshot_supported
@@ -528,7 +869,7 @@ impl DriverClient for MockDriver {
 
     async fn model_list(&self) -> Result<Vec<ModelObject>, DriverError> {
         let st = self.enter(DriverTool::ModelList).await?;
-        Ok(vec![st.object()])
+        Ok((0..st.objects.len()).map(|i| st.object_view(i)).collect())
     }
 
     async fn active_presets(&self) -> Result<ActivePresets, DriverError> {
@@ -539,7 +880,7 @@ impl DriverClient for MockDriver {
         Ok(ActivePresets {
             printer: Some("Mock Printer".to_string()),
             process: Some("0.20mm Standard".to_string()),
-            filaments: vec!["Mock PLA".to_string()],
+            filaments: st.filaments.iter().map(|f| f.preset.clone()).collect(),
         })
     }
 
@@ -565,20 +906,48 @@ impl DriverClient for MockDriver {
                 (Some(&st.plate_overrides), SettingSource::Plate)
             }
             SettingsTarget::Object { object_id } => {
-                if object_id != OBJECT_ID {
-                    return Err(DriverError::StaleReference {
-                        message: format!("unknown object {object_id}"),
-                    });
-                }
+                st.object_position(object_id)?;
                 (Some(&st.object_overrides), SettingSource::Object)
             }
         };
-        let wanted: Vec<&str> = match keys {
+        let mut wanted: Vec<&str> = match keys {
             Some(keys) => keys.iter().map(String::as_str).collect(),
             None => st.settings.keys().map(String::as_str).collect(),
         };
+        // The revision fingerprint reads every key of an object, so the
+        // object's slot is part of the unfiltered listing.
+        if keys.is_none() && matches!(target, SettingsTarget::Object { .. }) {
+            wanted.push("extruder");
+        }
         let mut out = Vec::with_capacity(wanted.len());
         for key in wanted {
+            // Keys the driver serves straight from the model / project config.
+            let derived = match (target, key) {
+                (SettingsTarget::Object { object_id }, "extruder") => {
+                    let object = &st.objects[st.object_position(object_id)?];
+                    let source = if object.extruder_assigned {
+                        SettingSource::Object
+                    } else {
+                        SettingSource::Project
+                    };
+                    Some((object.extruder.to_string(), source))
+                }
+                (SettingsTarget::Project, "filament_colour") => {
+                    Some((st.colour_list(), SettingSource::Project))
+                }
+                (SettingsTarget::Project, "filament_type") => {
+                    Some((st.type_list(), SettingSource::Project))
+                }
+                _ => None,
+            };
+            if let Some((value, source)) = derived {
+                out.push(EffectiveSetting {
+                    key: key.to_string(),
+                    value,
+                    source,
+                });
+                continue;
+            }
             let Some(base) = st.settings.get(key) else {
                 return Err(DriverError::InvalidParams {
                     message: format!("unknown setting {key}"),
@@ -626,11 +995,7 @@ impl DriverClient for MockDriver {
                 st.check_plate(*index)?;
             }
             SettingsTarget::Object { object_id } => {
-                if object_id != OBJECT_ID {
-                    return Err(DriverError::StaleReference {
-                        message: format!("unknown object {object_id}"),
-                    });
-                }
+                st.object_position(object_id)?;
             }
         }
         check_keys(values, &OVERRIDE_KEYS)?;
@@ -650,21 +1015,22 @@ impl DriverClient for MockDriver {
         t: &AbsoluteTransform,
     ) -> Result<ModelObject, DriverError> {
         let mut st = self.enter(DriverTool::ObjectTransform).await?;
-        if object_id != OBJECT_ID {
-            return Err(DriverError::StaleReference {
-                message: format!("unknown object {object_id}"),
-            });
-        }
-        if instance_id != INSTANCE_ID {
+        let o = st.object_position(object_id)?;
+        let Some(i) = st.objects[o]
+            .instances
+            .iter()
+            .position(|i| i.id == instance_id)
+        else {
             return Err(DriverError::StaleReference {
                 message: format!("unknown instance {instance_id}"),
             });
-        }
+        };
         st.take_snapshot();
-        st.instance.position_mm = t.position_mm;
-        st.instance.rotation_deg = t.rotation_deg;
-        st.instance.scale = t.scale;
-        Ok(st.object())
+        let instance = &mut st.objects[o].instances[i];
+        instance.position_mm = t.position_mm;
+        instance.rotation_deg = t.rotation_deg;
+        instance.scale = t.scale;
+        Ok(st.object_view(o))
     }
 
     async fn slice_start(
@@ -698,7 +1064,13 @@ impl DriverClient for MockDriver {
             reused: false,
         };
         st.valid_result = None;
-        st.jobs.insert(job.id.clone(), Job { job: job.clone() });
+        st.jobs.insert(
+            job.id.clone(),
+            Job {
+                job: job.clone(),
+                kind: JobKind::Slice,
+            },
+        );
         Ok(job)
     }
 
@@ -710,7 +1082,9 @@ impl DriverClient for MockDriver {
                 message: format!("unknown job {job_id}"),
             });
         };
+        let kind = entry.kind;
         let job = &mut entry.job;
+        let mut finished_arrange = false;
         if !job.status.is_terminal() {
             let progress = job
                 .progress_percent
@@ -719,13 +1093,52 @@ impl DriverClient for MockDriver {
                 .min(100);
             job.progress_percent = Some(progress);
             if progress >= 100 {
-                let result_id = format!("mock-result-{}", job.id);
-                job.status = JobStatus::Succeeded;
-                job.slice_result_id = Some(result_id.clone());
-                st.valid_result = Some((result_id, job.plate_index));
+                match kind {
+                    JobKind::Slice => {
+                        let result_id = format!("mock-result-{}", job.id);
+                        job.status = JobStatus::Succeeded;
+                        job.slice_result_id = Some(result_id.clone());
+                        st.valid_result = Some((result_id, job.plate_index));
+                    }
+                    JobKind::Arrange => finished_arrange = true,
+                }
             }
         }
-        Ok(job.clone())
+        let mut out = job.clone();
+        if finished_arrange {
+            // An arrange job never produces a slice result.
+            st.valid_result = None;
+            match st.arrange.clone() {
+                MockArrange::Fail(message) => {
+                    out.status = JobStatus::Failed;
+                    out.error = Some(DriverJobError {
+                        code: "NATIVE_ERROR".to_string(),
+                        message,
+                    });
+                }
+                MockArrange::Shift(by) => {
+                    st.shift_instances(by);
+                    out.status = JobStatus::Succeeded;
+                }
+                MockArrange::ShiftAndSwapPlates => {
+                    st.shift_instances(SWAP_SHIFT_MM);
+                    for object in &mut st.objects {
+                        for instance in &mut object.instances {
+                            instance.plate_index = match instance.plate_index {
+                                0 if st.plates.len() > 1 => 1,
+                                1 => 0,
+                                other => other,
+                            };
+                        }
+                    }
+                    out.status = JobStatus::Succeeded;
+                }
+            }
+            if let Some(entry) = st.jobs.get_mut(job_id) {
+                entry.job = out.clone();
+            }
+        }
+        Ok(out)
     }
 
     async fn job_cancel(&self, job_id: &str) -> Result<DriverJob, DriverError> {
@@ -823,83 +1236,297 @@ impl DriverClient for MockDriver {
             reused: false,
         })
     }
-    // TODO(task-2): replace with the real mock model.
+
     async fn plate_create(&self) -> Result<PlateList, DriverError> {
-        Err(DriverError::Protocol {
-            message: "not modelled by the mock yet".into(),
-        })
+        let mut st = self.enter(DriverTool::PlateCreate).await?;
+        st.take_snapshot();
+        st.plates.extend(unnamed_plates(1));
+        Ok(st.plate_state())
     }
-    // TODO(task-2): replace with the real mock model.
-    async fn plate_rename(&self, _i: u32, _r: &str, _n: &str) -> Result<PlateList, DriverError> {
-        Err(DriverError::Protocol {
-            message: "not modelled by the mock yet".into(),
-        })
+
+    async fn plate_rename(
+        &self,
+        plate_index: u32,
+        plate_revision: &str,
+        name: &str,
+    ) -> Result<PlateList, DriverError> {
+        let mut st = self.enter(DriverTool::PlateRename).await?;
+        st.check_revision(plate_revision)?;
+        st.check_plate(plate_index)?;
+        st.take_snapshot();
+        st.plates[plate_index as usize].name = name.to_string();
+        Ok(st.plate_state())
     }
-    // TODO(task-2): replace with the real mock model.
+
     async fn plate_delete(
         &self,
-        _i: u32,
-        _r: &str,
-        _c: PlateContents,
-        _t: Option<u32>,
+        plate_index: u32,
+        plate_revision: &str,
+        contents: PlateContents,
+        target_plate_index: Option<u32>,
     ) -> Result<PlateDeleted, DriverError> {
-        Err(DriverError::Protocol {
-            message: "not modelled by the mock yet".into(),
+        let mut st = self.enter(DriverTool::PlateDelete).await?;
+        st.check_revision(plate_revision)?;
+        st.check_plate(plate_index)?;
+        if st.plates.len() <= 1 {
+            return Err(invalid("Cannot delete the last plate"));
+        }
+        if st.plates[plate_index as usize].locked {
+            return Err(invalid("Unlock the plate before deleting it"));
+        }
+        let on_plate = st.instances_on(plate_index);
+        if contents == PlateContents::RequireEmpty && !on_plate.is_empty() {
+            return Err(invalid(
+                "Plate contains instances; choose contents=move or contents=delete explicitly",
+            ));
+        }
+        let mut target = None;
+        if contents == PlateContents::Move {
+            let Some(t) = target_plate_index else {
+                return Err(invalid("targetPlateIndex is required when contents=move"));
+            };
+            st.check_plate(t)?;
+            if t == plate_index {
+                return Err(invalid("Move destination must be another plate"));
+            }
+            if st.plates[t as usize].locked || !st.instances_on(t).is_empty() {
+                return Err(invalid("Move destination must be unlocked and empty"));
+            }
+            target = Some(t);
+        }
+        let doomed: BTreeSet<usize> = on_plate.iter().map(|(o, _)| *o).collect();
+        if contents == PlateContents::Delete {
+            let shared = doomed.iter().any(|o| {
+                st.objects[*o]
+                    .instances
+                    .iter()
+                    .any(|i| i.plate_index != plate_index as i32)
+            });
+            if shared {
+                return Err(invalid(
+                    "An object also has instances outside this plate; move its contents instead",
+                ));
+            }
+        }
+        st.take_snapshot();
+        let mut moved = 0;
+        let mut deleted = 0;
+        match (contents, target) {
+            (PlateContents::Move, Some(t)) => {
+                for (o, i) in &on_plate {
+                    st.objects[*o].instances[*i].plate_index = t as i32;
+                }
+                moved = on_plate.len() as u32;
+            }
+            (PlateContents::Delete, _) => {
+                let mut position = 0;
+                st.objects.retain(|_| {
+                    let keep = !doomed.contains(&position);
+                    position += 1;
+                    keep
+                });
+                reindex(&mut st.objects);
+                deleted = doomed.len() as u32;
+            }
+            _ => {}
+        }
+        st.plates.remove(plate_index as usize);
+        for object in &mut st.objects {
+            for instance in &mut object.instances {
+                if instance.plate_index > plate_index as i32 {
+                    instance.plate_index -= 1;
+                }
+            }
+        }
+        st.selected_plate = match st.selected_plate {
+            s if s > plate_index => s - 1,
+            s => s.min(st.plate_count() - 1),
+        };
+        let destination_plate_index = target.map(|t| if t > plate_index { t - 1 } else { t });
+        Ok(PlateDeleted {
+            plates: st.plate_state(),
+            moved_instances: moved,
+            deleted_objects: deleted,
+            destination_plate_index,
         })
     }
-    // TODO(task-2): replace with the real mock model.
+
     async fn plate_move_instance(
         &self,
-        _o: &str,
-        _n: &str,
-        _i: u32,
-        _r: &str,
+        object_id: &str,
+        instance_id: &str,
+        plate_index: u32,
+        plate_revision: &str,
     ) -> Result<PlateList, DriverError> {
-        Err(DriverError::Protocol {
-            message: "not modelled by the mock yet".into(),
+        let mut st = self.enter(DriverTool::PlateMoveInstance).await?;
+        st.check_revision(plate_revision)?;
+        let o = st.object_position(object_id)?;
+        let Some(i) = st.objects[o]
+            .instances
+            .iter()
+            .position(|i| i.id == instance_id)
+        else {
+            return Err(DriverError::StaleReference {
+                message: format!("unknown instance {instance_id}"),
+            });
+        };
+        st.check_plate(plate_index)?;
+        let source = st.objects[o].instances[i].plate_index;
+        if source < 0 {
+            return Err(invalid("Instance is not assigned to a plate"));
+        }
+        if st.plate_is_locked(source) || st.plates[plate_index as usize].locked {
+            return Err(invalid("Unlock both plates before moving the instance"));
+        }
+        if source != plate_index as i32 {
+            st.take_snapshot();
+            st.objects[o].instances[i].plate_index = plate_index as i32;
+        }
+        Ok(st.plate_state())
+    }
+
+    async fn filament_assign(
+        &self,
+        object_id: &str,
+        filament_index: u32,
+    ) -> Result<FilamentAssignment, DriverError> {
+        let mut st = self.enter(DriverTool::FilamentAssign).await?;
+        let o = st.object_position(object_id)?;
+        let Some(slot) = st.filaments.get(filament_index as usize) else {
+            return Err(invalid(&format!(
+                "filamentIndex {filament_index} out of range (project has {} filaments)",
+                st.filaments.len()
+            )));
+        };
+        let preset = slot.preset.clone();
+        st.take_snapshot();
+        st.objects[o].extruder = filament_index + 1;
+        st.objects[o].extruder_assigned = true;
+        st.assigned_indices.push(filament_index);
+        Ok(FilamentAssignment {
+            object_id: object_id.to_string(),
+            filament_index,
+            preset,
         })
     }
-    // TODO(task-2): replace with the real mock model.
-    async fn filament_assign(&self, _o: &str, _i: u32) -> Result<FilamentAssignment, DriverError> {
-        Err(DriverError::Protocol {
-            message: "not modelled by the mock yet".into(),
-        })
-    }
-    // TODO(task-2): replace with the real mock model.
+
     async fn arrange_start(&self) -> Result<DriverJob, DriverError> {
-        Err(DriverError::Protocol {
-            message: "not modelled by the mock yet".into(),
-        })
+        let mut st = self.enter(DriverTool::ArrangeStart).await?;
+        st.take_snapshot();
+        st.job_counter += 1;
+        let job = DriverJob {
+            id: format!("mock-job-{}:arrange", st.job_counter),
+            plate_index: st.selected_plate,
+            status: JobStatus::Running,
+            progress_percent: Some(0),
+            message: None,
+            error: None,
+            slice_result_id: None,
+            reused: false,
+        };
+        st.jobs.insert(
+            job.id.clone(),
+            Job {
+                job: job.clone(),
+                kind: JobKind::Arrange,
+            },
+        );
+        Ok(job)
     }
-    // TODO(task-2): replace with the real mock model.
+
     async fn device_list(&self) -> Result<Vec<DeviceSummary>, DriverError> {
-        Err(DriverError::Protocol {
-            message: "not modelled by the mock yet".into(),
-        })
+        let st = self.enter(DriverTool::DeviceList).await?;
+        Ok(st.devices.clone())
     }
-    // TODO(task-2): replace with the real mock model.
-    async fn ams_inventory(&self, _d: &str) -> Result<AmsInventory, DriverError> {
-        Err(DriverError::Protocol {
-            message: "not modelled by the mock yet".into(),
-        })
+
+    async fn ams_inventory(&self, device_id: &str) -> Result<AmsInventory, DriverError> {
+        let st = self.enter(DriverTool::AmsInventory).await?;
+        match &st.ams {
+            MockAms::Absent => Ok(AmsInventory { units: Vec::new() }),
+            MockAms::Offline => Err(DriverError::StaleReference {
+                message: format!("unknown device {device_id}"),
+            }),
+            MockAms::Units(units) => Ok(AmsInventory {
+                units: units.clone(),
+            }),
+        }
     }
-    // TODO(task-2): replace with the real mock model.
-    async fn project_save(&self, _p: &std::path::Path, _o: bool) -> Result<(), DriverError> {
-        Err(DriverError::Protocol {
-            message: "not modelled by the mock yet".into(),
-        })
+
+    async fn project_save(&self, path: &Path, overwrite: bool) -> Result<(), DriverError> {
+        let mut st = self.enter(DriverTool::ProjectSave).await?;
+        st.overwrite_flags.push(overwrite);
+        if !path.is_absolute() || path.extension().and_then(|e| e.to_str()) != Some("3mf") {
+            return Err(invalid("Save requires an absolute .3mf destination"));
+        }
+        if !path.parent().is_some_and(Path::is_dir) {
+            return Err(invalid("Destination directory does not exist"));
+        }
+        if path.exists() && !overwrite {
+            return Err(invalid("Destination exists; set overwrite=true"));
+        }
+        if st.write_files {
+            write_file(path, &mock_3mf("project"))?;
+        }
+        // No undo snapshot: only the project path and the dirty flag change.
+        st.project_path = path.to_string_lossy().into_owned();
+        st.dirty = false;
+        Ok(())
     }
-    // TODO(task-2): replace with the real mock model.
+
     async fn export_sliced_3mf(
         &self,
-        _i: u32,
-        _r: &str,
-        _s: &str,
-        _p: &std::path::Path,
-        _o: bool,
+        plate_index: u32,
+        plate_revision: &str,
+        slice_result_id: &str,
+        path: &Path,
+        overwrite: bool,
     ) -> Result<ExportedPlate, DriverError> {
-        Err(DriverError::Protocol {
-            message: "not modelled by the mock yet".into(),
+        let mut st = self.enter(DriverTool::ExportSliced3mf).await?;
+        st.overwrite_flags.push(overwrite);
+        if !path.is_absolute()
+            || !path
+                .to_string_lossy()
+                .to_lowercase()
+                .ends_with(".gcode.3mf")
+        {
+            return Err(invalid(
+                "Sliced export requires an absolute .gcode.3mf path",
+            ));
+        }
+        if !path.parent().is_some_and(Path::is_dir) {
+            return Err(invalid("Export parent directory does not exist"));
+        }
+        if path.exists() && !path.is_file() {
+            return Err(invalid("Destination must be a regular file"));
+        }
+        if path.exists() && !overwrite {
+            return Err(invalid("Destination exists; explicitly set overwrite=true"));
+        }
+        st.check_revision(plate_revision)?;
+        st.check_plate(plate_index)?;
+        if plate_index != st.selected_plate {
+            return Err(invalid(
+                "Only the selected plate is supported; select it explicitly first",
+            ));
+        }
+        match &st.valid_result {
+            Some((id, plate)) if id == slice_result_id && *plate == st.selected_plate => {}
+            _ => {
+                return Err(DriverError::StaleReference {
+                    message: "Selected plate no longer has the requested completed slice"
+                        .to_string(),
+                });
+            }
+        }
+        let bytes = mock_3mf(&format!("sliced plate {plate_index} {slice_result_id}"));
+        if st.write_files {
+            write_file(path, &bytes)?;
+        }
+        Ok(ExportedPlate {
+            slice_result_id: slice_result_id.to_string(),
+            plate_index,
+            path: path.to_string_lossy().into_owned(),
+            bytes: bytes.len() as u64,
         })
     }
 }
