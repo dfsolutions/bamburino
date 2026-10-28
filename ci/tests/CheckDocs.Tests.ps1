@@ -31,7 +31,7 @@ try {
     Assert-True ($r.Code -eq 0) 'clean tree passes'
 
     $cases = [ordered]@{
-        'italian marker'      = @("# T`nQuesto verificato è finito.`n", 'italian marker')
+        'italian marker'      = @(("# T`nQuesto verificato " + [char]0x00E8 + " finito.`n"), 'italian marker')
         'italian in docs'     = @("# T`n", 'italian marker', "Attenzione al file.`n")
         'status table'        = @("# T`n| Item | Outcome |`n|---|---|`n| a | passed |`n", 'outside verified')
         'status table (ok)'   = @("# T`n| Item | Outcome |`n|---|---|`n| a | verified |`n| b | not run |`n", $null)

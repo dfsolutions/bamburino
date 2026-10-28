@@ -21,6 +21,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Repository checks
+        shell: pwsh
+        run: |
+          pwsh ci/check-repo.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh ci/check-docs.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh ci/check-workflows.ps1 -Path .github/workflows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Toolchain (installs the version pinned in service/rust-toolchain.toml)
         working-directory: service
         run: rustup toolchain install

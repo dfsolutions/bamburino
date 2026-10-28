@@ -18,7 +18,7 @@ if (Test-Path -LiteralPath $docs) {
 }
 
 $italian = @('verificato', 'verificata', 'verificati', 'non eseguito', 'non eseguita', 'manuale', 'fallito', 'fallita',
-    'attenzione', 'nota:', 'della', 'per il', 'che', 'sono', 'questo', 'questa', 'dopo che', 'non è')
+    'attenzione', 'nota:', 'della', 'per il', 'che', 'sono', 'questo', 'questa', 'dopo che', ('non ' + [char]0x00E8))
 $italianRe = '(?i)(?<![\p{L}\p{N}_])(' + (($italian | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')(?![\p{L}\p{N}_])'
 $vocab = @('verified', 'failed', 'not run', 'manual')
 $statusColumns = @('outcome', 'result', 'verification', 'esito')

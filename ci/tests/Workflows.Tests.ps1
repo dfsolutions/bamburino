@@ -71,6 +71,8 @@ Assert-True ($svc -match 'actions/setup-python@5fda3b95a4ea91299a34e894583c38621
 Assert-True ($all -notmatch '(?m)^\s+workflow_run:') 'no workflow_run trigger anywhere'
 $studioJob = $std.Substring($std.IndexOf('  studio:'))
 Assert-True ($studioJob -match 'actions/checkout@[0-9a-f]{40} # v\S+\s+with:\s+persist-credentials: false') 'self-hosted checkout sets persist-credentials: false'
+Assert-True ($svc -match '(?m)^\s+run: \|[\s\S]*?pwsh ci/check-repo\.ps1' -and $svc.Contains('pwsh ci/check-docs.ps1') -and $svc.Contains('pwsh ci/check-workflows.ps1 -Path .github/workflows')) 'build-service runs check-repo, check-docs and check-workflows'
+Assert-True ($svc.IndexOf('pwsh ci/check-repo.ps1') -lt $svc.IndexOf('rustup toolchain install')) 'build-service: repository checks come before the cargo steps'
 Assert-True ($svc -match 'rustup toolchain install' -and $svc -notmatch 'rustup show') 'build-service installs the pinned toolchain (rustup toolchain install)'
 Assert-True ($std -notmatch 'D:\bb\artifacts' -and $std -match 'env\.BAMBURINO_BUILD_ROOT') 'build-studio upload path uses BAMBURINO_BUILD_ROOT'
 
