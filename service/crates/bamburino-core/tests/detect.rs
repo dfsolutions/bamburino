@@ -198,7 +198,7 @@ impl bamburino_core::detect::ProcessProbe for UnknownProcessProbe {
 }
 
 #[tokio::test]
-async fn timeout_is_not_reported_as_not_running_or_off() {
+async fn timeout_is_busy_not_not_running_or_off() {
     for running in [true, false] {
         let mock = Arc::new(MockDriver::new());
         mock.fail_next(DriverError::Timeout { after_ms: 5000 });
@@ -206,7 +206,9 @@ async fn timeout_is_not_reported_as_not_running_or_off() {
             .require_ready(false, false)
             .await
             .unwrap_err();
-        assert_eq!(e.code, ToolErrorCode::DriverError);
+        // A modal dialog blocks the GUI thread: BUSY (design 9, step 10).
+        assert_eq!(e.code, ToolErrorCode::Busy);
+        assert_eq!(e.details["reason"], "driver_timeout");
         assert!(e.message.contains("timed out"), "{}", e.message);
         assert!(!e.message.contains("not running") && !e.message.contains("is off"));
     }

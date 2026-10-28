@@ -110,6 +110,8 @@ pub enum StudioStatus {
     DriverFault {
         code: ToolErrorCode,
         message: String,
+        /// `details.reason` of the resulting tool error, when there is one.
+        reason: Option<&'static str>,
     },
     Ready {
         app_version: String,
@@ -211,8 +213,16 @@ impl StatusProbe {
                 ToolErrorCode::DriverError,
                 "The driver is unreachable and the process list could not be inspected, so the state of Bambu Studio is unknown.",
             )),
-            Probe::Other(StudioStatus::DriverFault { code, message }) => {
-                Err(ToolError::new(code, message))
+            Probe::Other(StudioStatus::DriverFault {
+                code,
+                message,
+                reason,
+            }) => {
+                let err = ToolError::new(code, message);
+                Err(match reason {
+                    Some(r) => err.with_details(json!({ "reason": r })),
+                    None => err,
+                })
             }
             Probe::Other(StudioStatus::Ready { .. }) => {
                 unreachable!("Probe::Other never carries Ready")
@@ -281,6 +291,8 @@ impl StatusProbe {
     /// Maps a failed driver call. Only `Unreachable` means nobody listens, and
     /// then the process list decides between `NotRunning` and `DriverOff`.
     /// Every other error means the driver was reached and is reported as such.
+    /// A timeout reads as `BUSY` (design 9, step 10): the driver dispatches on
+    /// the GUI thread, and a modal native dialog blocks it until it closes.
     fn classify(&self, err: DriverError) -> StudioStatus {
         match err {
             DriverError::Unauthorized => StudioStatus::Unauthorized,
@@ -292,13 +304,31 @@ impl StatusProbe {
             DriverError::Busy { message } => StudioStatus::DriverFault {
                 code: ToolErrorCode::Busy,
                 message,
+                reason: Some("driver_busy"),
             },
+            DriverError::Timeout { after_ms } => {
+                tracing::warn!(after_ms, "driver read timed out");
+                StudioStatus::DriverFault {
+                    code: ToolErrorCode::Busy,
+                    message: timeout_message(after_ms),
+                    reason: Some("driver_timeout"),
+                }
+            }
             other => StudioStatus::DriverFault {
                 code: ToolErrorCode::DriverError,
                 message: other.to_string(),
+                reason: None,
             },
         }
     }
+}
+
+/// Message of a read that timed out: Studio is busy, typically a modal
+/// dialog is open.
+pub(crate) fn timeout_message(after_ms: u64) -> String {
+    format!(
+        "Bambu Studio did not answer within {after_ms} ms (driver call timed out): it is busy, typically a dialog is open. Close it and retry."
+    )
 }
 
 #[cfg(test)]

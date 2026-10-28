@@ -23,11 +23,27 @@
 //!
 //! # Revision values
 //!
-//! A revision is `(process epoch in ms << 20) | sequence`, the sequence being
-//! strictly increasing inside the process. Restarting the service therefore
-//! never reuses revisions of a previous run, and a stale `expected_revision`
-//! from before the restart cannot match. [`RevisionState::current`] is 0
-//! before the first successful `refresh`.
+//! A revision is `(process epoch in seconds << 20) | sequence`, the sequence
+//! being strictly increasing inside the process. Every value stays at or below
+//! `Number.MAX_SAFE_INTEGER` (2^53 - 1, [`MAX_SAFE_REVISION`]): JavaScript
+//! clients parse JSON numbers as `f64`, and a larger value would come back
+//! rounded in `expected_revision`, so every mutation would conflict. With 20
+//! sequence bits the epoch has 33 bits, enough until the year 2242 (today
+//! about 2^51). [`RevisionState::current`] is 0 before the first successful
+//! `refresh`.
+//!
+//! Distinct across restarts: the epoch is the wall-clock second, so a stale
+//! `expected_revision` from a previous run cannot match as long as the two
+//! runs have different epochs. Two runs started within the same second
+//! would share the epoch and could reuse values. The service avoids that by
+//! calling [`wait_for_next_epoch_second`] once at startup, before building
+//! the state: the process then starts on a second boundary it has waited
+//! for, so a following run (which starts after this one began, and waits
+//! too) always gets a later second. The cost is up to one second of
+//! startup. Inside one process, [`RevisionState::new`] also never hands out
+//! the same epoch twice (it moves to the next second when needed), which is
+//! what tests and multiple tool sets in one process rely on. The wall clock
+//! moving backwards across a restart is not handled.
 //!
 //! # Race window (contract for the mutation pipeline, Task 10)
 //!
@@ -46,13 +62,13 @@
 //! Therefore the mutation pipeline MUST call `refresh` immediately after the
 //! mutation returns, so that the new revision reflects the mutation and is
 //! not mistaken for a user edit later. When `undo_snapshot` is available
-//! (patch 0120), it MUST also check that the snapshot id advanced by exactly
-//! one snapshot between the pre- and post-mutation reads, and report a
-//! conflict otherwise.
+//! (patch 0120), it MUST also check that the snapshot id advanced by at least
+//! `n` snapshots for `n` snapshotting calls (a lower bound: after a user undo
+//! the next snapshot skips the undone ids), and report a conflict otherwise.
 
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -73,6 +89,39 @@ pub const DEFAULT_IDLE_AFTER: Duration = Duration::from_secs(60);
 const SEQ_BITS: u32 = 20;
 const SEQ_MASK: u64 = (1 << SEQ_BITS) - 1;
 
+/// `Number.MAX_SAFE_INTEGER`: the largest integer a JavaScript client reads
+/// back exactly. Every revision is at or below it.
+pub const MAX_SAFE_REVISION: u64 = (1 << 53) - 1;
+
+/// Last epoch handed out in this process, so two states never share one.
+static LAST_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Blocks until the wall clock enters a new second (at most one second).
+/// Called once at service startup, before the revision state is built, so
+/// that two consecutive runs never share an epoch (see the module docs).
+pub fn wait_for_next_epoch_second() {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let into = Duration::from_nanos(u64::from(now.subsec_nanos()));
+    std::thread::sleep(Duration::from_secs(1) - into);
+}
+
+/// Revision value for `epoch` (seconds) and a non-zero `seq`.
+pub fn revision_value(epoch: u64, seq: u64) -> u64 {
+    debug_assert!(seq <= SEQ_MASK, "revision sequence wrapped past 20 bits");
+    let rev = (epoch << SEQ_BITS) | (seq & SEQ_MASK);
+    debug_assert!(rev <= MAX_SAFE_REVISION, "revision above 2^53 - 1");
+    rev
+}
+
 /// Effective settings of one object or plate, keyed `object:<id>` or
 /// `plate:<index>`.
 pub type ScopedSettings = (String, Vec<EffectiveSetting>);
@@ -83,7 +132,8 @@ pub struct RevisionState {
     inner: Mutex<(u64, Option<[u8; 32]>)>,
     /// Serializes whole refreshes (reads + compare + bump).
     refresh_lock: tokio::sync::Mutex<()>,
-    epoch_ms: u64,
+    /// Process epoch in seconds.
+    epoch: u64,
     /// Milliseconds since `origin` of the last client request, -1 if none.
     last_client_activity: AtomicI64,
     origin: Instant,
@@ -99,21 +149,29 @@ impl Default for RevisionState {
 }
 
 impl RevisionState {
-    /// Seeds the revision epoch with the current wall-clock time.
+    /// Seeds the revision epoch with the current wall-clock second, moved
+    /// forward when needed so that no two states of this process share it.
     pub fn new() -> Self {
-        let ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        Self::with_epoch(ms)
+        let now = now_secs();
+        let mut prev = LAST_EPOCH.load(Ordering::Relaxed);
+        let epoch = loop {
+            let next = now.max(prev + 1);
+            match LAST_EPOCH.compare_exchange_weak(prev, next, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => break next,
+                Err(p) => prev = p,
+            }
+        };
+        Self::with_epoch(epoch)
     }
 
-    /// Like [`Self::new`] with an explicit epoch (milliseconds).
-    pub fn with_epoch(epoch_ms: u64) -> Self {
+    /// Like [`Self::new`] with an explicit epoch (seconds since the Unix
+    /// epoch).
+    pub fn with_epoch(epoch: u64) -> Self {
         Self {
             inner: Mutex::new((0, None)),
             refresh_lock: tokio::sync::Mutex::new(()),
-            epoch_ms,
+            epoch,
             last_client_activity: AtomicI64::new(-1),
             origin: Instant::now(),
             poll_errors: AtomicU32::new(0),
@@ -131,7 +189,7 @@ impl RevisionState {
         if seq == 0 {
             0
         } else {
-            (self.epoch_ms << SEQ_BITS) | (seq & SEQ_MASK)
+            revision_value(self.epoch, seq)
         }
     }
 

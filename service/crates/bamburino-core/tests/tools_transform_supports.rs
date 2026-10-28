@@ -15,14 +15,17 @@ use bamburino_core::validate::Scope;
 use serde_json::{Value, json};
 
 fn tools_with(mock: &Arc<MockDriver>) -> Tools {
+    tools_with_process(mock, true)
+}
+
+fn tools_with_process(mock: &Arc<MockDriver>, studio_running: bool) -> Tools {
     Tools::new(
         mock.clone(),
-        Arc::new(FixedProcessProbe(true)),
+        Arc::new(FixedProcessProbe(studio_running)),
         ToolConfig {
             allow_version_mismatch: false,
             poll_every: Duration::from_secs(60),
             idle_after: Duration::from_secs(60),
-            token_present: true,
         },
         std::env::temp_dir().join("bamburino-tests-unused"),
     )
@@ -356,7 +359,7 @@ async fn supports_object_scope_uses_override() {
 }
 
 #[tokio::test]
-async fn supports_plate_scope_expands_to_objects() {
+async fn supports_plate_scope_is_a_plate_override() {
     let mock = Arc::new(MockDriver::new());
     let t = tools_with(&mock);
     let rev = revision(&t).await;
@@ -370,12 +373,39 @@ async fn supports_plate_scope_expands_to_objects() {
         .await
         .unwrap_or_else(|e| panic!("{}", err_msg(&e)));
     assert_eq!(applied(&r, "enable_support"), vec!["1"]);
-    assert_eq!(r["applied"][0]["scope"], "object");
-    assert_eq!(r["applied"][0]["target"]["object_id"], "obj-1");
+    assert_eq!(applied(&r, "support_type"), vec!["tree(auto)"]);
+    // Only plate-scoped changes, one per key: no per-object expansion.
+    let entries = r["applied"].as_array().unwrap();
+    assert_eq!(entries.len(), 2, "{r}");
+    for a in entries {
+        assert_eq!(a["scope"], "plate", "{a}");
+        assert_eq!(a["target"]["plate_id"], 0, "{a}");
+        assert!(a["target"]["object_id"].is_null(), "{a}");
+    }
+    let calls = mock.calls().join(",");
+    assert!(calls.contains("settings_override"), "{calls}");
+    assert!(!calls.contains("settings_update"), "{calls}");
 }
 
 #[tokio::test]
-async fn supports_plate_without_objects_is_invalid_argument() {
+async fn supports_plate_scope_with_studio_closed_is_not_running() {
+    let mock = Arc::new(MockDriver::new());
+    let t = tools_with_process(&mock, false);
+    mock.set_unreachable(true);
+    let target = SupportTarget {
+        scope: Scope::Plate,
+        plate_id: Some(0),
+        object_id: None,
+    };
+    let e = t
+        .studio_set_supports(supports(target, tree(), 1))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ToolErrorCode::StudioNotRunning, "{}", err_msg(&e));
+}
+
+#[tokio::test]
+async fn supports_plate_scope_on_a_missing_plate_writes_nothing() {
     let mock = Arc::new(MockDriver::new());
     let t = tools_with(&mock);
     let rev = revision(&t).await;
@@ -388,7 +418,9 @@ async fn supports_plate_without_objects_is_invalid_argument() {
         .studio_set_supports(supports(target, tree(), rev))
         .await
         .unwrap_err();
-    assert_eq!(e.code, ToolErrorCode::InvalidArgument);
+    assert_eq!(e.code, ToolErrorCode::PlateNotFound, "{}", err_msg(&e));
+    let calls = mock.calls().join(",");
+    assert!(!calls.contains("settings_override"), "{calls}");
 }
 
 #[tokio::test]

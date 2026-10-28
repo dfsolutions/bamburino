@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use bamburino_core::build_info;
 use bamburino_core::detect::FixedProcessProbe;
+use bamburino_core::driver::DriverError;
 use bamburino_core::driver::mock::MockDriver;
+use bamburino_core::errors::ToolErrorCode;
 use bamburino_core::tools::{GetSettingsArgs, SearchArgs, TargetRef, ToolConfig, Tools};
 use bamburino_core::validate::Scope;
 use serde_json::Value;
@@ -19,7 +21,6 @@ fn tools_with(mock: &Arc<MockDriver>, process_running: bool) -> Tools {
             allow_version_mismatch: false,
             poll_every: Duration::from_secs(60),
             idle_after: Duration::from_secs(60),
-            token_present: true,
         },
         std::env::temp_dir().join("bamburino-tests-unused"),
     )
@@ -300,4 +301,38 @@ fn args_reject_unknown_fields() {
     assert!(serde_json::from_str::<SearchArgs>(r#"{"query":"a","extra":1}"#).is_err());
     assert!(serde_json::from_str::<GetSettingsArgs>(r#"{"scope":"project","x":1}"#).is_err());
     assert!(serde_json::from_str::<TargetRef>(r#"{"plate_id":1,"y":1}"#).is_err());
+}
+
+#[tokio::test]
+async fn get_state_reports_the_studio_instance() {
+    let mock = Arc::new(MockDriver::new());
+    let t = tools_with(&mock, true);
+    let v = t.studio_get_state().await.unwrap();
+    assert_eq!(v["instance"]["session_id"], "mock-session");
+    assert!(
+        v["instance"]["app_version"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
+        "{v}"
+    );
+    mock.set_session("restarted");
+    let v = t.studio_get_state().await.unwrap();
+    assert_eq!(v["instance"]["session_id"], "restarted");
+}
+
+#[tokio::test]
+async fn get_state_driver_timeout_reads_as_busy() {
+    let mock = Arc::new(MockDriver::new());
+    let t = tools_with(&mock, true);
+    mock.fail_next(DriverError::Timeout { after_ms: 5000 });
+    let e = t.studio_get_state().await.unwrap_err();
+    assert_eq!(e.code, ToolErrorCode::Busy, "{e:?}");
+    assert_eq!(e.details["reason"], "driver_timeout", "{e:?}");
+    // A timeout on a later read of the same call is BUSY too.
+    for n in 1..4 {
+        mock.fail_after(n, DriverError::Timeout { after_ms: 5000 });
+        let e = t.studio_get_state().await.unwrap_err();
+        assert_eq!(e.code, ToolErrorCode::Busy, "skip {n}: {e:?}");
+        assert_eq!(e.details["reason"], "driver_timeout", "skip {n}: {e:?}");
+    }
 }

@@ -25,7 +25,6 @@ fn tools_in(mock: &Arc<MockDriver>, dir: PathBuf) -> Tools {
             allow_version_mismatch: false,
             poll_every: Duration::from_secs(60),
             idle_after: Duration::from_secs(60),
-            token_present: true,
         },
         dir,
     )

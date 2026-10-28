@@ -24,7 +24,6 @@ fn tools_over(driver: Arc<dyn DriverClient>) -> Tools {
             allow_version_mismatch: false,
             poll_every: Duration::from_secs(60),
             idle_after: Duration::from_secs(60),
-            token_present: true,
         },
         std::env::temp_dir().join("bamburino-tests-unused"),
     )
@@ -880,5 +879,20 @@ async fn dry_run_snapshot_mismatch_is_not_reported_as_applied() {
     assert_eq!(e.details["reason"], "revision_mismatch");
     assert_eq!(e.details["outcome"], "not_applied");
     assert!(!e.message.contains("WAS applied"));
+    assert_eq!(writes(&mock), 0);
+}
+
+#[tokio::test]
+async fn driver_timeout_before_the_write_reads_as_busy() {
+    let mock = Arc::new(MockDriver::new());
+    let t = tools_with(&mock);
+    let rev = revision(&t).await;
+    mock.fail_next(DriverError::Timeout { after_ms: 5000 });
+    let e = t
+        .studio_set_settings(args(demo(), rev, None))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ToolErrorCode::Busy, "{e:?}");
+    assert_eq!(e.details["reason"], "driver_timeout", "{e:?}");
     assert_eq!(writes(&mock), 0);
 }

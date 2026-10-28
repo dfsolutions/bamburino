@@ -1077,29 +1077,24 @@ impl Tools {
                     ));
                 }
             },
-            // Support keys are not plate-scoped in the catalog: they become
-            // object overrides on every object that sits on the plate.
-            Scope::Plate => {
-                let Some(plate) = t.plate_id else {
+            // The catalog gives the `plate` scope to all four support keys
+            // (they are in OVERRIDE_KEYS): a plate override, written by
+            // `studio_set_settings` inside its guarded pipeline.
+            Scope::Plate => match t.plate_id {
+                Some(plate) => vec![(
+                    Scope::Plate,
+                    Some(TargetRef {
+                        plate_id: Some(plate),
+                        object_id: None,
+                    }),
+                )],
+                None => {
                     return Err(ToolError::new(
                         ToolErrorCode::InvalidArgument,
                         "scope plate requires target.plate_id",
                     ));
-                };
-                let models = self.driver.model_list().await.map_err(driver_error)?;
-                let ids: Vec<String> = models
-                    .iter()
-                    .filter(|m| m.instances.iter().any(|i| i.plate_index == plate as i32))
-                    .map(|m| m.id.clone())
-                    .collect();
-                if ids.is_empty() {
-                    return Err(ToolError::new(
-                        ToolErrorCode::InvalidArgument,
-                        format!("plate {plate} has no objects to set supports on"),
-                    ));
                 }
-                ids.into_iter().map(object_target).collect()
-            }
+            },
         };
         let changes: Vec<Change> = targets
             .iter()

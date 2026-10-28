@@ -29,7 +29,6 @@ fn make_tools(mock: &Arc<MockDriver>, studio_running: bool, poll: Duration) -> A
             allow_version_mismatch: false,
             poll_every: poll,
             idle_after: Duration::from_secs(60),
-            token_present: true,
         },
         std::env::temp_dir().join("bamburino-server-tests-unused"),
     ))

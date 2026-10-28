@@ -38,7 +38,6 @@ fn tools(mock: &Arc<MockDriver>) -> Tools {
             allow_version_mismatch: false,
             poll_every: Duration::from_secs(60),
             idle_after: Duration::from_secs(60),
-            token_present: true,
         },
         std::env::temp_dir().join("bamburino-tests-unused"),
     )

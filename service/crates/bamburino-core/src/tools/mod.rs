@@ -31,9 +31,6 @@ pub struct ToolConfig {
     pub poll_every: Duration,
     /// Time without client requests after which polling stops.
     pub idle_after: Duration,
-    /// Whether a driver token is configured (from the service configuration,
-    /// Task 13); drives the `driver_token_missing` status.
-    pub token_present: bool,
 }
 
 pub struct Tools {
@@ -81,9 +78,10 @@ impl Tools {
         cfg: ToolConfig,
         export_dir: std::path::PathBuf,
     ) -> Self {
-        // Task 13: `token_present` comes from the configuration (it was
-        // hard-coded to `true` before the config existed).
-        let probe = Arc::new(StatusProbe::new(driver.clone(), process, cfg.token_present));
+        // The driver client decides whether a token is configured
+        // (`DriverClient::token_configured`, which follows `driver.token`
+        // live), so the probe is not given a frozen flag.
+        let probe = Arc::new(StatusProbe::new(driver.clone(), process, true));
         Self {
             driver,
             catalog: Catalog::embedded(),
@@ -148,9 +146,15 @@ pub(crate) fn driver_error(e: DriverError) -> ToolError {
             ToolErrorCode::DriverUnauthorized,
             "Run: bamburino.exe config set-driver-token",
         ),
-        other @ DriverError::Timeout { after_ms } => {
+        // A modal dialog blocks the GUI thread the driver dispatches on: a
+        // timed-out read is BUSY (design 9, step 10), not a driver fault.
+        DriverError::Timeout { after_ms } => {
             tracing::warn!(after_ms, "driver read timed out");
-            ToolError::new(ToolErrorCode::DriverError, other.to_string())
+            ToolError::new(
+                ToolErrorCode::Busy,
+                crate::detect::timeout_message(after_ms),
+            )
+            .with_details(serde_json::json!({ "reason": "driver_timeout" }))
         }
         other => ToolError::new(ToolErrorCode::DriverError, other.to_string()),
     }

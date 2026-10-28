@@ -125,7 +125,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool_def::<SliceArgs>(
             "studio_slice",
-            "Starts slicing a plate in Studio (does not modify the project) and returns a job id.",
+            "Starts slicing a plate in Studio and returns a job id. Slicing itself does not modify the project, but a `plate_id` different from the selected plate is selected first (plate_select): that takes an undo snapshot and bumps the revision.",
             false,
         ),
         tool_def::<JobArgs>(

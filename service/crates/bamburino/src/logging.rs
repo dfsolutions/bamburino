@@ -262,7 +262,10 @@ fn real_acl(dir: &Path, owner_sid: &str) -> io::Result<()> {
 /// and `owner_sid`, and grant nothing to Everyone, Users, Authenticated
 /// Users or Interactive.
 fn sddl_problem(sddl: &str, owner_sid: &str) -> Option<String> {
-    let dacl = sddl.split("D:").nth(1)?;
+    // No DACL segment: fail closed.
+    let Some(dacl) = sddl.split("D:").nth(1) else {
+        return Some("it has no DACL".to_owned());
+    };
     if !dacl.starts_with('P') {
         return Some("its DACL is not protected".to_owned());
     }
@@ -418,4 +421,23 @@ pub fn init_logging_with_secrets(
     let (sub, guard) = build_subscriber(dir, retention_days, to_stderr, owner_sid, secrets);
     tracing::subscriber::set_global_default(sub).map_err(|_| LogError::AlreadyInitialized)?;
     Ok(guard)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sddl_problem;
+
+    #[test]
+    fn sddl_without_a_dacl_is_a_problem() {
+        let p = sddl_problem("O:SYG:SY", "S-1-5-21-1-2-3-1001");
+        assert_eq!(p.as_deref(), Some("it has no DACL"));
+    }
+
+    #[test]
+    fn protected_dacl_with_the_expected_entries_is_fine() {
+        let owner = "S-1-5-21-1-2-3-1001";
+        let sddl =
+            format!("O:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LS)(A;OICI;FA;;;{owner})");
+        assert_eq!(sddl_problem(&sddl, owner), None);
+    }
 }

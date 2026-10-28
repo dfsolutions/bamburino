@@ -30,7 +30,10 @@ pub struct Prepared {
 }
 
 /// Loads the configuration in `dir`, installs logging and builds the tools.
-/// `token_present` is evaluated here, so every service start re-reads it.
+/// The driver token is not frozen here: the driver client re-reads
+/// `driver.token` live and reports `driver_token_missing` itself. Waits up
+/// to one second before building the tools so that the revision epoch of
+/// this run differs from the previous run's (see `bamburino_core::revision`).
 /// The G-code export directory is `<dir>\tmp`.
 pub fn prepare(dir: &ConfigDir, to_stderr: bool) -> Result<Prepared, String> {
     let cfg = Config::load(dir).map_err(|e| e.to_string())?;
@@ -87,6 +90,7 @@ pub fn prepare(dir: &ConfigDir, to_stderr: bool) -> Result<Prepared, String> {
     if let Err(e) = std::fs::create_dir_all(&export_dir) {
         tracing::warn!("cannot create {}: {e}", export_dir.display());
     }
+    bamburino_core::revision::wait_for_next_epoch_second();
     let tools = Tools::new(
         Arc::new(driver),
         Arc::new(WindowsProcessProbe),
@@ -94,9 +98,6 @@ pub fn prepare(dir: &ConfigDir, to_stderr: bool) -> Result<Prepared, String> {
             allow_version_mismatch: cfg.allow_version_mismatch,
             poll_every: Duration::from_millis(cfg.poll_interval_ms),
             idle_after: POLL_IDLE_AFTER,
-            // The driver client follows driver.token live and reports
-            // `driver_token_missing` itself.
-            token_present: true,
         },
         export_dir,
     );

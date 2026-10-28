@@ -86,6 +86,11 @@ impl Tools {
                 "status": "driver_error",
                 "message": "the driver is unreachable and the process list could not be inspected",
             }),
+            StudioStatus::DriverFault {
+                code: ToolErrorCode::Busy,
+                message,
+                ..
+            } => json!({"status": "busy", "message": message}),
             StudioStatus::DriverFault { message, .. } => {
                 json!({"status": "driver_error", "message": message})
             }
@@ -151,6 +156,12 @@ impl Tools {
             })
             .collect();
         Ok(json!({
+            // The running Studio instance (brief 5): `session_id` changes when
+            // Studio restarts.
+            "instance": {
+                "session_id": app.session_id,
+                "app_version": app.app_version,
+            },
             "project": {
                 "name": app.project_name,
                 "path": app.project_path,

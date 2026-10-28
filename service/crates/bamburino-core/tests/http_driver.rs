@@ -217,12 +217,16 @@ async fn mutations_use_the_mutation_timeout() {
     mount_tool(
         &server,
         "settings_update",
-        tool_ok(json!({"updated":{}})).set_delay(Duration::from_millis(300)),
+        tool_ok(json!({"updated":{}})).set_delay(Duration::from_secs(2)),
     )
     .await;
+    // Margins wide enough for a loaded machine: the handshake (not delayed)
+    // has 1 s under the read timeout, and the mutation answers after 2 s,
+    // which only succeeds if the 10 s mutation timeout applies to it and
+    // not the 1 s read timeout.
     let mut cfg = config(&server);
-    cfg.read_timeout = Duration::from_millis(100);
-    cfg.mutation_timeout = Duration::from_secs(5);
+    cfg.read_timeout = Duration::from_secs(1);
+    cfg.mutation_timeout = Duration::from_secs(10);
     let client = HttpDriverClient::new(cfg).unwrap();
     client.settings_update(&one_value()).await.unwrap();
 }

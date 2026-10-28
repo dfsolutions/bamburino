@@ -8,7 +8,7 @@ use bamburino_core::driver::mock::MockDriver;
 use bamburino_core::driver::{
     ActivePresets, AppState, DriverClient, EffectiveSetting, PlateList, SettingSource,
 };
-use bamburino_core::revision::{RevisionState, fingerprint};
+use bamburino_core::revision::{MAX_SAFE_REVISION, RevisionState, fingerprint, revision_value};
 
 fn seq(rev: u64) -> u64 {
     rev & 0xF_FFFF
@@ -234,4 +234,56 @@ async fn poller_counts_errors_and_stops_on_signal() {
     assert_eq!(rev.last_poll_error(), None);
     rev.stop_poller();
     handle.await.unwrap();
+}
+
+const JS_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+#[test]
+fn max_safe_revision_is_javascript_max_safe_integer() {
+    assert_eq!(MAX_SAFE_REVISION, JS_MAX_SAFE_INTEGER);
+}
+
+fn first_revision(state: &RevisionState) -> u64 {
+    let driver = MockDriver::new();
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(state.refresh(&driver))
+        .unwrap()
+}
+
+#[test]
+fn revision_generated_now_fits_in_a_javascript_number() {
+    let rev = first_revision(&RevisionState::new());
+    assert!(rev <= JS_MAX_SAFE_INTEGER, "{rev}");
+    assert_eq!(rev as f64 as u64, rev);
+    // A JSON round trip through f64, as a JavaScript client does it.
+    let back: f64 = serde_json::from_str(&serde_json::to_string(&rev).unwrap()).unwrap();
+    assert_eq!(back as u64, rev);
+}
+
+#[test]
+fn revision_in_year_2100_fits_in_a_javascript_number() {
+    // 2100-01-01T00:00:00Z
+    let rev = first_revision(&RevisionState::with_epoch(4_102_444_800));
+    assert!(rev <= JS_MAX_SAFE_INTEGER, "{rev}");
+    assert_eq!(rev as f64 as u64, rev);
+    // Even with the largest sequence the value stays exact.
+    let top = revision_value(4_102_444_800, 0xF_FFFF);
+    assert!(top <= JS_MAX_SAFE_INTEGER, "{top}");
+    assert_eq!(top as f64 as u64, top);
+}
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "wrapped")]
+fn sequence_wrap_is_caught_in_debug_builds() {
+    let _ = revision_value(1_000, 0x10_0000);
+}
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "2^53")]
+fn epoch_beyond_the_safe_range_is_caught_in_debug_builds() {
+    let _ = revision_value(1 << 33, 1);
 }

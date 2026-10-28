@@ -16,7 +16,9 @@
 //! `LocalService`, whose `%TEMP%` the user cannot reach) reads and deletes it.
 //! Production value: `%ProgramData%\Bamburino\tmp`, created by the installer
 //! with an ACL that gives the interactive user write and the service
-//! read/delete. The directory must exist; the service does not create it.
+//! read/delete. The service creates the directory at startup when it is
+//! missing (`runtime::prepare` in the `bamburino` crate), but it does not set
+//! that ACL: the installer does. This module never creates it.
 
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
