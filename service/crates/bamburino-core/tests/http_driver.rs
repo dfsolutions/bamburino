@@ -785,3 +785,53 @@ async fn export_gcode_sends_path_and_never_overwrites() {
     assert_eq!(args["path"], path.to_str().unwrap());
     assert_eq!(args["overwrite"], false);
 }
+
+fn bearers(requests: &[wiremock::Request]) -> Vec<String> {
+    requests
+        .iter()
+        .map(|r| {
+            r.headers
+                .get("authorization")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn token_file_is_reread_when_it_changes() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("driver.token");
+    std::fs::write(&file, "").unwrap();
+    let client = HttpDriverClient::new(config(&server))
+        .unwrap()
+        .with_token_file(file.clone());
+
+    // Empty file: no token, no call.
+    assert!(!client.token_configured());
+    assert_eq!(
+        client.app_state().await.unwrap_err(),
+        DriverError::Unauthorized
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+
+    std::fs::write(&file, "tok-one\n").unwrap();
+    assert!(client.token_configured());
+    let _ = client.app_state().await;
+    std::fs::write(&file, "tok-two-longer").unwrap();
+    let _ = client.app_state().await;
+
+    let got = bearers(&server.received_requests().await.unwrap());
+    assert_eq!(got, ["Bearer tok-one", "Bearer tok-two-longer"]);
+
+    std::fs::write(&file, "").unwrap();
+    assert!(!client.token_configured());
+    assert!(!format!("{client:?}").contains("tok-two"));
+}

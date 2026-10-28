@@ -65,10 +65,17 @@ fn redacted(token: &Option<String>) -> &'static str {
     }
 }
 
+/// The token in use and, when it is file-backed, the file stamp it came from.
+struct TokenState {
+    value: Option<String>,
+    stamp: Option<(std::time::SystemTime, u64)>,
+}
+
 pub struct HttpDriverClient {
     http: reqwest::Client,
     url: Url,
-    token: Option<String>,
+    token: std::sync::Mutex<TokenState>,
+    token_file: Option<std::path::PathBuf>,
     read_timeout: Duration,
     mutation_timeout: Duration,
     /// `true` once the `initialize` handshake succeeded; the lock also
@@ -81,7 +88,7 @@ impl fmt::Debug for HttpDriverClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HttpDriverClient")
             .field("url", &self.url.as_str())
-            .field("token", &redacted(&self.token))
+            .field("token", &redacted(&self.current_token()))
             .field("read_timeout", &self.read_timeout)
             .field("mutation_timeout", &self.mutation_timeout)
             .finish_non_exhaustive()
@@ -131,12 +138,44 @@ impl HttpDriverClient {
         Ok(Self {
             http,
             url: cfg.url,
-            token: cfg.token,
+            token: std::sync::Mutex::new(TokenState {
+                value: cfg.token,
+                stamp: None,
+            }),
+            token_file: None,
             read_timeout: cfg.read_timeout,
             mutation_timeout: cfg.mutation_timeout,
             initialized: Mutex::new(false),
             next_id: AtomicU64::new(1),
         })
+    }
+
+    /// Makes the token follow `path`: whenever the file's modification time
+    /// or size changes it is re-read (trimmed; empty means no token), so a new
+    /// token takes effect without restarting the process. The token given in
+    /// the config is used until the file is first seen to differ.
+    pub fn with_token_file(mut self, path: std::path::PathBuf) -> Self {
+        self.token_file = Some(path);
+        self
+    }
+
+    /// The token to use now (re-read from the token file if it changed).
+    fn current_token(&self) -> Option<String> {
+        let mut state = self.token.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(path) = &self.token_file {
+            let stamp = std::fs::metadata(path)
+                .and_then(|m| Ok((m.modified()?, m.len())))
+                .ok();
+            if stamp != state.stamp {
+                state.stamp = stamp;
+                state.value = stamp.and_then(|_| {
+                    let text = std::fs::read_to_string(path).ok()?;
+                    let t = text.trim();
+                    (!t.is_empty()).then(|| t.to_owned())
+                });
+            }
+        }
+        state.value.clone()
     }
 
     fn next_id(&self) -> u64 {
@@ -146,7 +185,7 @@ impl HttpDriverClient {
     /// One HTTP exchange. Returns the parsed JSON-RPC response (`Null` for an
     /// empty body such as the `202` of a notification).
     async fn post(&self, body: &Value, timeout: Duration) -> Result<Value, CallError> {
-        let token = self.token.as_deref().ok_or(DriverError::Unauthorized)?;
+        let token = self.current_token().ok_or(DriverError::Unauthorized)?;
         let after_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
         let map_send = |e: reqwest::Error| -> DriverError {
             // A failed or timed-out connect means nobody is listening.
@@ -235,7 +274,7 @@ impl HttpDriverClient {
     /// `tools/call` with the lazy handshake and one re-initialization after a
     /// protocol error. Returns the tool's structured result.
     async fn call(&self, tool: DriverTool, arguments: Value) -> Result<Value, DriverError> {
-        if self.token.is_none() {
+        if self.current_token().is_none() {
             return Err(DriverError::Unauthorized);
         }
         let timeout = if tool.is_mutation() {
@@ -639,6 +678,10 @@ async fn preset_selected(
 
 #[async_trait::async_trait]
 impl DriverClient for HttpDriverClient {
+    fn token_configured(&self) -> bool {
+        self.current_token().is_some()
+    }
+
     async fn app_state(&self) -> Result<AppState, DriverError> {
         parse_app_state(&self.call(DriverTool::AppGetState, json!({})).await?)
     }

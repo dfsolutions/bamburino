@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bamburino::config::{Config, ConfigDir};
+use bamburino::ports;
 use tokio::sync::Notify;
 use windows_service::service::{
     Service, ServiceAccess, ServiceAction, ServiceActionType, ServiceControl, ServiceControlAccept,
@@ -23,6 +24,10 @@ const DESCRIPTION: &str = "Local MCP server that lets AI clients drive Bambu Stu
 const ACCOUNT: &str = r"NT AUTHORITY\LocalService";
 /// Exit code when the command needs an elevated prompt (ERROR_ACCESS_DENIED).
 pub const EXIT_NOT_ELEVATED: i32 = 5;
+/// Errors that stop the service are appended here (inside `logs\`).
+const ERROR_LOG: &str = "service-errors.log";
+/// The log is restarted when it grows past this size.
+const ERROR_LOG_CAP: u64 = 256 * 1024;
 const ERROR_FAILED_SERVICE_CONTROLLER_CONNECT: i32 = 1063;
 const ERROR_SERVICE_DOES_NOT_EXIST: i32 = 1060;
 
@@ -54,42 +59,6 @@ pub fn is_elevated() -> bool {
         CloseHandle(token);
         ok != 0 && elevation.TokenIsElevated != 0
     }
-}
-
-/// A Known Folder of the user running this process (`FOLDERID_Documents`,
-/// ...), which follows OneDrive redirection.
-fn known_folder(id: &windows_sys::core::GUID) -> Option<PathBuf> {
-    use std::os::windows::ffi::OsStringExt;
-    use windows_sys::Win32::System::Com::CoTaskMemFree;
-    use windows_sys::Win32::UI::Shell::SHGetKnownFolderPath;
-    // SAFETY: on success the call returns a NUL-terminated wide string that
-    // we copy and then free with CoTaskMemFree, as documented.
-    unsafe {
-        let mut raw: *mut u16 = std::ptr::null_mut();
-        let hr = SHGetKnownFolderPath(id, 0, std::ptr::null_mut(), &mut raw);
-        if hr != 0 || raw.is_null() {
-            if !raw.is_null() {
-                CoTaskMemFree(raw.cast());
-            }
-            return None;
-        }
-        let mut len = 0usize;
-        while *raw.add(len) != 0 {
-            len += 1;
-        }
-        let path = PathBuf::from(OsString::from_wide(std::slice::from_raw_parts(raw, len)));
-        CoTaskMemFree(raw.cast());
-        Some(path)
-    }
-}
-
-/// Documents and Downloads of the installing user.
-fn default_allowed_dirs() -> Vec<PathBuf> {
-    use windows_sys::Win32::UI::Shell::{FOLDERID_Documents, FOLDERID_Downloads};
-    [FOLDERID_Documents, FOLDERID_Downloads]
-        .iter()
-        .filter_map(known_folder)
-        .collect()
 }
 
 fn program_files_exe() -> PathBuf {
@@ -172,6 +141,56 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// Copies `me` next to `target` as `bamburino.exe.new`, then renames it over
+/// the target, so a failed copy never leaves a truncated binary.
+fn install_binary(me: &Path, target: &Path) -> Result<(), String> {
+    let parent = target.parent().expect("target has a parent");
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    let staged = target.with_extension("exe.new");
+    let result = std::fs::copy(me, &staged)
+        .and_then(|_| std::fs::rename(&staged, target))
+        .map_err(|e| format!("cannot install the executable in {}: {e}", target.display()));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+    result
+}
+
+/// Waits for Running; a service that falls back to Stopped while starting is
+/// an immediate error.
+fn wait_running(service: &Service, limit: Duration) -> Result<(), String> {
+    let end = Instant::now() + limit;
+    loop {
+        match service
+            .query_status()
+            .map_err(|e| svc_err("cannot query the service", e))?
+            .current_state
+        {
+            ServiceState::Running => return Ok(()),
+            ServiceState::Stopped => {
+                return Err("the service stopped while starting".to_owned());
+            }
+            _ if Instant::now() > end => {
+                return Err(format!(
+                    "the service did not reach Running within {} s",
+                    limit.as_secs()
+                ));
+            }
+            _ => std::thread::sleep(Duration::from_millis(250)),
+        }
+    }
+}
+
+/// Last line of the service error log, if any.
+fn last_error_line(dir: &ConfigDir) -> Option<String> {
+    let text = std::fs::read_to_string(dir.logs_dir().join(ERROR_LOG)).ok()?;
+    text.lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .map(str::to_owned)
+}
+
 // ---------------------------------------------------------------- install
 
 /// `--install`: configuration, ACLs, binary, service registration, start.
@@ -192,12 +211,16 @@ pub fn install() -> i32 {
 
 fn try_install() -> Result<(), String> {
     let dir = ConfigDir::resolve(None);
-    let defaults = Config {
-        allowed_dirs: default_allowed_dirs(),
-        ..Config::default()
-    };
-    dir.init_with(defaults).map_err(|e| e.to_string())?;
+    dir.init().map_err(|e| e.to_string())?;
     println!("configuration ready in {}", dir.0.display());
+    let cfg = Config::load(&dir).map_err(|e| e.to_string())?;
+    let pre = ports::preflight(&cfg, &ports::netsh_excluded_ranges);
+    for w in &pre.warnings {
+        eprintln!("warning: {w}");
+    }
+    if let Some(refusal) = pre.refusal {
+        return Err(format!("{refusal}; no service was created"));
+    }
 
     let manager = ServiceManager::local_computer(
         None::<&str>,
@@ -215,12 +238,14 @@ fn try_install() -> Result<(), String> {
 
     let target = program_files_exe();
     let me = std::env::current_exe().map_err(|e| format!("cannot locate this executable: {e}"))?;
-    if !same_file(&me, &target) {
-        let parent = target.parent().expect("target has a parent");
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
-        std::fs::copy(&me, &target)
-            .map_err(|e| format!("cannot copy the executable to {}: {e}", target.display()))?;
+    if !same_file(&me, &target)
+        && let Err(e) = install_binary(&me, &target)
+    {
+        // The old service (if any) was stopped for the copy: bring it back.
+        if let Some(s) = &existing {
+            let _ = s.start::<&str>(&[]);
+        }
+        return Err(e);
     }
     println!("binary installed in {}", target.display());
 
@@ -262,18 +287,24 @@ fn try_install() -> Result<(), String> {
             delay: Duration::from_secs(10),
         }]),
     });
-    service
+    let started = service
         .start::<&str>(&[])
-        .map_err(|e| svc_err("cannot start the service", e))?;
-    wait_for(&service, ServiceState::Running, Duration::from_secs(30))?;
+        .map_err(|e| svc_err("cannot start the service", e))
+        .and_then(|()| wait_running(&service, Duration::from_secs(30)));
+    if let Err(e) = started {
+        let last =
+            last_error_line(&dir).map_or(String::new(), |l| format!(" (last service error: {l})"));
+        return Err(format!(
+            "{e}{last}; the service stays installed: fix the cause (see {}) and run `Start-Service {SERVICE_NAME}`",
+            dir.logs_dir().join(ERROR_LOG).display()
+        ));
+    }
     println!("service {SERVICE_NAME} installed and running");
     println!();
     println!("Next steps:");
     println!("  1. bamburino config set-driver-token   (token on stdin, never echoed)");
-    println!(
-        "  2. Restart-Service {SERVICE_NAME}             (elevated; the service reads the token at start)"
-    );
-    println!("  3. bamburino config client-snippet     (prints the command for your MCP client)");
+    println!("      (the running service picks the new token up by itself: no restart needed)");
+    println!("  2. bamburino config client-snippet     (prints the command for your MCP client)");
     Ok(())
 }
 
@@ -406,11 +437,16 @@ fn run_service() -> Result<(), String> {
             .build()
             .map_err(|e| format!("cannot start the async runtime: {e}"))?;
         let accept = ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN;
-        let _ = handle.set_service_status(status(ServiceState::Running, accept, 0, 0));
-        let result = rt.block_on(crate::runtime::serve(&prepared, async {
-            stop.notified().await;
-            let _ = handle.set_service_status(status(ServiceState::StopPending, none, 0, 15));
-        }));
+        let result = rt.block_on(async {
+            // Bind first: Running is only reported once the port is ours.
+            let listener = crate::runtime::bind(&prepared.cfg).await?;
+            let _ = handle.set_service_status(status(ServiceState::Running, accept, 0, 0));
+            crate::runtime::serve_on(&prepared, listener, async {
+                stop.notified().await;
+                let _ = handle.set_service_status(status(ServiceState::StopPending, none, 0, 15));
+            })
+            .await
+        });
         if let Err(e) = &result {
             tracing::error!("server stopped with an error: {e}");
         }
@@ -420,7 +456,7 @@ fn run_service() -> Result<(), String> {
     let exit = match &outcome {
         Ok(()) => 0,
         Err(e) => {
-            record_startup_error(&dir, e);
+            record_service_error(&dir, e);
             1
         }
     };
@@ -428,19 +464,28 @@ fn run_service() -> Result<(), String> {
     outcome
 }
 
-/// Leaves a trace in `logs\startup-error.log` when the service cannot even
-/// start (bad configuration, port in use). The message never contains a token.
-fn record_startup_error(dir: &ConfigDir, message: &str) {
+/// Appends to `logs\service-errors.log` when the service cannot start or
+/// dies (bad configuration, port reserved or in use). The message never
+/// contains a token. The file restarts once it exceeds `ERROR_LOG_CAP`.
+fn record_service_error(dir: &ConfigDir, message: &str) {
     use std::io::Write;
     let logs = dir.logs_dir();
     if std::fs::create_dir_all(&logs).is_err() {
         return;
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(logs.join("startup-error.log"))
-    {
-        let _ = writeln!(f, "{message}");
+    let path = logs.join(ERROR_LOG);
+    let big = std::fs::metadata(&path).is_ok_and(|m| m.len() > ERROR_LOG_CAP);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true);
+    if big {
+        opts.write(true).truncate(true);
+    } else {
+        opts.append(true);
+    }
+    if let Ok(mut f) = opts.open(&path) {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let _ = writeln!(f, "[unix {secs}] {message}");
     }
 }

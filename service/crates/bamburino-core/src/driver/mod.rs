@@ -20,6 +20,11 @@ pub use types::*;
 
 #[async_trait::async_trait]
 pub trait DriverClient: Send + Sync {
+    /// Whether a driver token is currently configured. Clients without a
+    /// token concept (mocks) report `true`.
+    fn token_configured(&self) -> bool {
+        true
+    }
     async fn app_state(&self) -> Result<AppState, DriverError>;
     async fn capabilities(&self) -> Result<DriverCapabilities, DriverError>;
     async fn plate_list(&self) -> Result<PlateList, DriverError>;

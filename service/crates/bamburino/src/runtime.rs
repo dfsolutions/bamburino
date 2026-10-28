@@ -69,8 +69,7 @@ pub fn prepare(dir: &ConfigDir, to_stderr: bool) -> Result<Prepared, String> {
         );
     }
 
-    let token_present = driver_token.is_some();
-    if !token_present {
+    if driver_token.is_none() {
         tracing::warn!("no driver token configured: run `bamburino config set-driver-token`");
     }
     let url = parse_driver_url(&cfg.driver_url).map_err(|e| format!("driver_url: {e}"))?;
@@ -80,7 +79,9 @@ pub fn prepare(dir: &ConfigDir, to_stderr: bool) -> Result<Prepared, String> {
         read_timeout: Duration::from_millis(cfg.read_timeout_ms),
         mutation_timeout: Duration::from_millis(cfg.mutation_timeout_ms),
     })
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())?
+    // `set-driver-token` takes effect without a service restart.
+    .with_token_file(driver_path);
 
     let export_dir = dir.tmp_dir();
     if let Err(e) = std::fs::create_dir_all(&export_dir) {
@@ -93,7 +94,9 @@ pub fn prepare(dir: &ConfigDir, to_stderr: bool) -> Result<Prepared, String> {
             allow_version_mismatch: cfg.allow_version_mismatch,
             poll_every: Duration::from_millis(cfg.poll_interval_ms),
             idle_after: POLL_IDLE_AFTER,
-            token_present,
+            // The driver client follows driver.token live and reports
+            // `driver_token_missing` itself.
+            token_present: true,
         },
         export_dir,
     );
@@ -107,12 +110,30 @@ pub fn prepare(dir: &ConfigDir, to_stderr: bool) -> Result<Prepared, String> {
     })
 }
 
-/// Serves until `shutdown` completes. The server owns the revision poller.
-pub async fn serve(
+/// Windows error "access to the socket is forbidden" (WSAEACCES): what a bind
+/// on a port inside an excluded range returns.
+const WSAEACCES: i32 = 10013;
+
+/// Binds `127.0.0.1:<listen_port>`. Done before the service reports Running.
+pub async fn bind(cfg: &Config) -> Result<tokio::net::TcpListener, String> {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], cfg.listen_port));
+    tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+        if e.raw_os_error() == Some(WSAEACCES) {
+            bamburino::ports::reserved_message(cfg.listen_port)
+        } else {
+            format!("cannot bind {addr}: {e}")
+        }
+    })
+}
+
+/// Serves on `listener` until `shutdown` completes. The server owns the
+/// revision poller.
+pub async fn serve_on(
     p: &Prepared,
+    listener: tokio::net::TcpListener,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) -> Result<(), String> {
-    bamburino::server::serve(&p.cfg, p.client_token.clone(), p.tools.clone(), shutdown)
+    bamburino::server::serve_on(listener, p.client_token.clone(), p.tools.clone(), shutdown)
         .await
         .map_err(|e| e.to_string())
 }

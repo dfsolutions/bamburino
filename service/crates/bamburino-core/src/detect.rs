@@ -244,7 +244,7 @@ impl StatusProbe {
     }
 
     async fn probe(&self) -> Probe {
-        if !self.token_present {
+        if !self.token_present || !self.driver.token_configured() {
             return Probe::Other(StudioStatus::TokenMissing);
         }
         let state = match self.driver.app_state().await {

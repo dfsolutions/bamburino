@@ -21,7 +21,7 @@ fn load_str(toml: &str) -> Result<Config, ConfigError> {
 fn default_config_is_valid() {
     let c = Config::default();
     c.validate().unwrap();
-    assert_eq!(c.listen_port, 27190);
+    assert_eq!(c.listen_port, 27600);
     assert_eq!(c.driver_url, "http://127.0.0.1:27183/mcp");
     assert_eq!(c.read_timeout_ms, 10000);
     assert_eq!(c.mutation_timeout_ms, 35000);
@@ -33,7 +33,7 @@ fn default_config_is_valid() {
 #[test]
 fn empty_file_loads_defaults() {
     let c = load_str("").unwrap();
-    assert_eq!(c.listen_port, 27190);
+    assert_eq!(c.listen_port, 27600);
 }
 
 #[test]

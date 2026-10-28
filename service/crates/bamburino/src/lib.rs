@@ -5,6 +5,7 @@ pub mod acl;
 pub mod config;
 pub mod console;
 pub mod logging;
+pub mod ports;
 pub mod secrets;
 pub mod secure;
 pub mod server;

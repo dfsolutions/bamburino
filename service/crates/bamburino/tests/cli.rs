@@ -166,6 +166,32 @@ fn config_dir_rejected_without_run_or_config_subcommand() {
 }
 
 #[test]
+fn mode_flag_with_config_subcommand_is_a_usage_error() {
+    bamburino()
+        .args(["--install", "config", "init"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
+fn run_reports_a_port_that_cannot_be_bound() {
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let dir = config_dir(taken.local_addr().unwrap().port());
+    let out = bamburino()
+        .args(["--run", "--config-dir"])
+        .arg(dir.path())
+        .assert()
+        .failure()
+        .code(1);
+    assert!(
+        both_streams(&out).contains("cannot bind"),
+        "{}",
+        both_streams(&out)
+    );
+}
+
+#[test]
 fn purge_requires_uninstall() {
     bamburino().arg("--purge").assert().failure().code(2);
     bamburino()
@@ -272,9 +298,13 @@ fn install_uninstall_roundtrip_as_admin() {
         .output()
         .unwrap();
     assert!(String::from_utf8_lossy(&q.stdout).contains("RUNNING"));
+    let installed = bamburino::config::ConfigDir::resolve(None);
+    let port = bamburino::config::Config::load(&installed)
+        .unwrap()
+        .listen_port;
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
-        if http_get(27190, "/healthz").is_some_and(|r| r.trim_end().ends_with("ok")) {
+        if http_get(port, "/healthz").is_some_and(|r| r.trim_end().ends_with("ok")) {
             break;
         }
         assert!(Instant::now() < deadline, "healthz did not answer");

@@ -18,6 +18,7 @@ use clap::{ArgGroup, CommandFactory, Parser, Subcommand, ValueEnum};
     name = "bamburino",
     about = "Local MCP bridge for Bambu Studio",
     disable_version_flag = true,
+    args_conflicts_with_subcommands = true,
     group(ArgGroup::new("mode").args(["run", "service", "install", "uninstall", "version"]).multiple(false))
 )]
 struct Cli {
@@ -147,9 +148,13 @@ fn run_foreground(config_dir: Option<PathBuf>) -> i32 {
             .enable_all()
             .build()
             .map_err(|e| format!("cannot start the async runtime: {e}"))?;
-        rt.block_on(runtime::serve(&prepared, async {
-            let _ = tokio::signal::ctrl_c().await;
-        }))
+        rt.block_on(async {
+            let listener = runtime::bind(&prepared.cfg).await?;
+            runtime::serve_on(&prepared, listener, async {
+                let _ = tokio::signal::ctrl_c().await;
+            })
+            .await
+        })
     })();
     match result {
         Ok(()) => 0,
@@ -201,9 +206,7 @@ fn run_config(cmd: &ConfigCmd, config_dir: Option<PathBuf>) -> i32 {
     let explicit = config_dir.is_some();
     let dir = ConfigDir::resolve(config_dir);
     let result = match cmd {
-        ConfigCmd::Init => dir
-            .init()
-            .map(|()| println!("configuration ready in {}", dir.0.display())),
+        ConfigCmd::Init => init_config(&dir),
         ConfigCmd::SetDriverToken => set_driver_token(&dir, explicit),
         ConfigCmd::ClientSnippet { client } => client_snippet(&dir, *client),
     };
@@ -213,6 +216,22 @@ fn run_config(cmd: &ConfigCmd, config_dir: Option<PathBuf>) -> i32 {
             eprintln!("error: {e}");
             1
         }
+    }
+}
+
+/// `config init`, then the port preflight (a reserved `listen_port` is an
+/// error: the config stays and can be edited).
+fn init_config(dir: &ConfigDir) -> Result<(), ConfigError> {
+    dir.init()?;
+    println!("configuration ready in {}", dir.0.display());
+    let cfg = Config::load(dir)?;
+    let pre = bamburino::ports::preflight(&cfg, &bamburino::ports::netsh_excluded_ranges);
+    for w in &pre.warnings {
+        eprintln!("warning: {w}");
+    }
+    match pre.refusal {
+        Some(r) => Err(ConfigError::Invalid(r)),
+        None => Ok(()),
     }
 }
 
