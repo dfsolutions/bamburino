@@ -240,3 +240,13 @@ pub struct MoveToPlateArgs {
     /// Revision from `studio_get_state`; the call is refused when stale.
     pub expected_revision: u64,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ArrangeArgs {
+    /// Plate to select before arranging, 0-based. The driver arranges the
+    /// whole project (`scope: "project"`), so objects may move to other plates.
+    pub plate_index: u32,
+    /// Revision from `studio_get_state`; the call is refused when stale.
+    pub expected_revision: u64,
+}

@@ -3,6 +3,7 @@
 //! `read`.
 
 pub mod args;
+mod arrange;
 mod filaments;
 mod mutate;
 mod plates;
@@ -19,10 +20,10 @@ use crate::errors::{ToolError, ToolErrorCode};
 use crate::revision::RevisionState;
 
 pub use args::{
-    AssignFilamentArgs, Change, GetSettingsArgs, JobArgs, ListFilamentsArgs, MoveToPlateArgs,
-    PlateCreateArgs, PlateDeleteArgs, PlateDeleteContents, PlateRenameArgs, SearchArgs,
-    SetSettingsArgs, SliceArgs, SummaryArgs, SupportKind, SupportSettings, SupportStyle,
-    SupportTarget, SupportsArgs, TargetRef, Transform, TransformArgs, TransformMode,
+    ArrangeArgs, AssignFilamentArgs, Change, GetSettingsArgs, JobArgs, ListFilamentsArgs,
+    MoveToPlateArgs, PlateCreateArgs, PlateDeleteArgs, PlateDeleteContents, PlateRenameArgs,
+    SearchArgs, SetSettingsArgs, SliceArgs, SummaryArgs, SupportKind, SupportSettings,
+    SupportStyle, SupportTarget, SupportsArgs, TargetRef, Transform, TransformArgs, TransformMode,
 };
 pub use filaments::{normalize_ams_colour, parse_project_colours};
 pub use mutate::compose_rotation_deg;

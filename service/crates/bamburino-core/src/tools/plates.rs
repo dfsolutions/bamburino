@@ -185,7 +185,7 @@ fn plate_locked(index: u32) -> ToolError {
     .with_details(json!({ "plate_index": index }))
 }
 
-fn check_plate(list: &PlateList, index: u32) -> Result<&Plate, ToolError> {
+pub(crate) fn check_plate(list: &PlateList, index: u32) -> Result<&Plate, ToolError> {
     list.plates
         .iter()
         .find(|p| p.index == index)
