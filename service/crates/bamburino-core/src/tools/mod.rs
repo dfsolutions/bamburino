@@ -4,6 +4,7 @@
 
 pub mod args;
 mod mutate;
+mod plates;
 mod read;
 mod slice;
 
@@ -48,6 +49,10 @@ pub struct Tools {
     /// Directory allowlist for the tools that will take paths (none does in
     /// the MVP); set once by the service at startup.
     path_guard: std::sync::OnceLock<crate::pathguard::PathGuard>,
+    /// Poll period of the job-wait loops (plates, arrange, export).
+    pub(crate) job_poll_every: Duration,
+    /// Upper bound of a job-wait loop.
+    pub(crate) job_timeout: Duration,
     /// Set by the first `start_poller` call.
     poller_started: std::sync::atomic::AtomicBool,
 }
@@ -92,8 +97,18 @@ impl Tools {
             jobs: std::sync::Mutex::new(std::collections::HashMap::new()),
             export_dir,
             path_guard: std::sync::OnceLock::new(),
+            job_poll_every: Duration::from_millis(500),
+            job_timeout: Duration::from_secs(120),
             poller_started: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Overrides the job-wait settings (defaults 500 ms / 120 s); tests use
+    /// short values.
+    pub fn with_job_wait(mut self, poll_every: Duration, timeout: Duration) -> Self {
+        self.job_poll_every = poll_every;
+        self.job_timeout = timeout;
+        self
     }
 
     /// Installs the path allowlist (first call wins).
