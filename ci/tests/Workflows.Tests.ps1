@@ -99,18 +99,33 @@ esac; }
 ref_sha=abc
 '@
     [IO.File]::WriteAllText($tmp, ($stub + "`n" + ($fn -join "`n") + "`ncheck_run 1 build-service`n"))
-    $bash = (Get-Command bash -ErrorAction SilentlyContinue)
+    # `bash` on PATH can be the WSL launcher (System32\bash.exe) with no distro: it exits 1 for every script,
+    # which would make the reject tests vacuous and the accept tests fail. Probe candidates, use the first that works.
+    $bash = $null
+    $cands = @(Get-Command bash -All -ErrorAction SilentlyContinue | ForEach-Object { $_.Source })
+    $gitCmd = Get-Command git -ErrorAction SilentlyContinue
+    if ($gitCmd) { $gr = Split-Path (Split-Path $gitCmd.Source); $cands = @((Join-Path $gr 'bin\bash.exe'), (Join-Path $gr 'usr\bin\bash.exe')) + $cands }
+    foreach ($c in $cands) {
+        if ($c -and (Test-Path $c)) { $probe = (& $c -c 'echo probe-ok' 2>$null); if ($LASTEXITCODE -eq 0 -and "$probe".Trim() -eq 'probe-ok') { $bash = $c; break } }
+    }
     if ($bash) {
         foreach ($ev in 'pull_request', 'pull_request_target', 'schedule') {
-            $env:FAKE_EVENT = $ev; & bash $tmp 2>&1 | Out-Null
+            $env:FAKE_EVENT = $ev; & $bash $tmp 2>&1 | Out-Null
             Assert-True ($LASTEXITCODE -ne 0) "check_run rejects a '$ev' run"
         }
         foreach ($ev in 'push', 'workflow_dispatch') {
-            $env:FAKE_EVENT = $ev; & bash $tmp 2>&1 | Out-Null
+            $env:FAKE_EVENT = $ev; & $bash $tmp 2>&1 | Out-Null
             Assert-True ($LASTEXITCODE -eq 0) "check_run accepts a '$ev' run"
         }
-        $env:FAKE_EVENT = 'push'; $env:FAKE_PATH = '.github/workflows/evil.yml@refs/heads/main'; & bash $tmp 2>&1 | Out-Null
+        $env:FAKE_EVENT = 'push'; $env:FAKE_PATH = '.github/workflows/evil.yml@refs/heads/main'; & $bash $tmp 2>&1 | Out-Null
         Assert-True ($LASTEXITCODE -ne 0) 'check_run rejects a run of another workflow file'
+        # tag-triggered runs report the bare workflow path (no @ref): accepted; a longer name with the same prefix is not
+        $env:FAKE_EVENT = 'push'; $env:FAKE_PATH = '.github/workflows/build-service.yml'; & $bash $tmp 2>&1 | Out-Null
+        Assert-True ($LASTEXITCODE -eq 0) 'check_run accepts the bare workflow path (no @ref)'
+        $env:FAKE_PATH = '.github/workflows/build-service.yml.evil'; & $bash $tmp 2>&1 | Out-Null
+        Assert-True ($LASTEXITCODE -ne 0) 'check_run rejects a bare path with a suffix'
+        $env:FAKE_PATH = '.github/workflows/evil.yml'; & $bash $tmp 2>&1 | Out-Null
+        Assert-True ($LASTEXITCODE -ne 0) 'check_run rejects a bare path of another workflow file'
         Remove-Item Env:FAKE_PATH
         Remove-Item Env:FAKE_EVENT
     } else { Write-Host '  skip bash not found: shell snippet test' }
