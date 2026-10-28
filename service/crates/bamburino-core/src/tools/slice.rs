@@ -128,7 +128,8 @@ pub(crate) struct HeaderUsage {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FilamentRow {
-    /// 0-based filament slot (Studio shows `index + 1`).
+    /// 0-based filament index (the tool output also carries `slot` = `index + 1`, the
+    /// 1-based slot Bamburino uses everywhere else).
     pub index: u32,
     pub grams: Option<f64>,
     pub meters: Option<f64>,
@@ -516,6 +517,7 @@ impl Tools {
             .map(|r| {
                 json!({
                     "index": r.index,
+                    "slot": r.index + 1,
                     "grams": r.grams,
                     "meters": r.meters.map(round4),
                     "volume_cm3": r.volume_cm3,

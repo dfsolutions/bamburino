@@ -270,7 +270,7 @@ Every failure is `{"error": {"code", "message", "http_status", "details"}}`.
 | `OBJECT_NOT_FOUND`, `PLATE_NOT_FOUND`, `JOB_NOT_FOUND` | The id does not exist. Re-read with `studio_get_state` or `studio_list_models`. |
 | `PARTIALLY_APPLIED` | Some changes were applied and a later one failed; `details` lists both. The applied part is in Studio's undo history. |
 | `INVALID_ARGUMENT` | The input does not match the tool's schema. |
-| `PLATE_NOT_EMPTY` | A plate to delete or to move onto holds instances (`details.reason`). Choose `contents` or an empty target. |
+| `PLATE_NOT_EMPTY` | A plate to delete holds instances, or the destination of its move is not empty (`details.reason`). Choose `contents` or an empty target. |
 | `PLATE_LOCKED` | A plate involved is locked in Studio. Unlock it there and retry. |
 | `LAST_PLATE` | The project's only plate cannot be deleted. |
 | `INSTANCE_REQUIRED` | The object has several instances; pass `instance_id`. |

@@ -9,7 +9,7 @@ The 21 tools in the order of `Tools::NAMES` in the service. Input fields come fr
 - Mutations (`studio_set_settings`, `studio_transform_model`, `studio_set_supports`, `studio_assign_filament`, `studio_plate_create`, `studio_plate_rename`, `studio_plate_delete`, `studio_move_to_plate`, `studio_arrange`) take `expected_revision`, the `revision` of your last read. On a mismatch nothing is written and `REVISION_CONFLICT` carries `details.reason`, `details.expected`, `details.current` and `details.state`. Slicing tools, `studio_save_project` and `studio_export_plate` do not take a revision.
 - `scope` is `project`, `plate` or `object`. `plate` needs `plate_id`, `object` needs `object_id` (ids as returned by `studio_get_state` and `studio_list_models`).
 - Plate numbers: `plate_index` is the 0-based number that `studio_get_state` calls `plate_id` (`studio_slice` and `studio_get_slice_summary` call it `plate_id` too). Filament slots are 1-based in Bamburino (slot 1 is the first project filament); Bamburino converts to the driver's 0-based index.
-- New codes of the plate, filament and file tools: `PLATE_NOT_EMPTY` (a plate to delete or to move onto holds instances; `details.reason` says which), `PLATE_LOCKED` (a plate involved is locked in Studio; unlock it there), `LAST_PLATE` (the only plate cannot be deleted), `INSTANCE_REQUIRED` (the object has several instances and `instance_id` was not given), `NOT_SLICED` (the plate has no current slice result), `FILE_EXISTS` (the file exists and `overwrite` is not `true`), `PATH_NOT_ALLOWED` (the path is outside `allowed_dirs` or breaks the path rules; `details.reason` names the rule, the message never repeats the path).
+- New codes of the plate, filament and file tools: `PLATE_NOT_EMPTY` (a plate to delete holds instances, or the destination of its move is not empty; `details.reason` says which), `PLATE_LOCKED` (a plate involved is locked in Studio; unlock it there), `LAST_PLATE` (the only plate cannot be deleted), `INSTANCE_REQUIRED` (the object has several instances and `instance_id` was not given), `NOT_SLICED` (the plate has no current slice result), `FILE_EXISTS` (the file exists and `overwrite` is not `true`), `PATH_NOT_ALLOWED` (the path is outside `allowed_dirs` or breaks the path rules; `details.reason` names the rule, the message never repeats the path).
 - The file tools (`studio_save_project`, `studio_export_plate`) need an absolute path inside `allowed_dirs` (listed by `bamburino_capabilities`), in an existing folder (path and root names match exactly except for ASCII letter case: use the spelling `allowed_dirs` shows); they never create folders and never overwrite unless `overwrite: true`. They return `bytes` and `sha256`; when the service cannot read the file back (for example it runs as LocalService and the folder is private to the user) `sha256` is `null` and `hash_unavailable_reason` says why. `allowed_dirs` is written into `config.toml` by `config init` for the account that runs it, so `--install` run by a different admin account writes that admin's Documents and Downloads folders, not the user's.
 - Meaning of every error code: README, Errors table.
 
@@ -203,7 +203,9 @@ Purpose: time, filament and warnings of the current slice result of a plate.
 |---|---|---|---|
 | `plate_id` | integer | no | Default: the selected plate, the only one that can hold a current result. |
 
-Result fields: `plate_id`, `print_time_s` (from Studio's estimate string), `filaments[]` (`index`, `grams`, `meters`, `volume_cm3`; from the header of a temporary exported G-code), `support_volume_mm3`, `warnings`, `note`, `revision`.
+Result fields: `plate_id`, `print_time_s` (from Studio's estimate string), `filaments[]` (`slot`, `index`, `grams`, `meters`, `volume_cm3`; from the header of a temporary exported G-code), `support_volume_mm3`, `warnings`, `note`, `revision`.
+
+`slot` is the 1-based filament slot, the same numbering as `studio_assign_filament` and `studio_list_filaments`; always use it. `index` is the driver's 0-based value (`slot - 1`), kept for compatibility. Do not mix them.
 
 Errors: `PLATE_NOT_FOUND`, `INVALID_ARGUMENT`, `BUSY`, `DRIVER_ERROR`.
 
@@ -297,7 +299,7 @@ Purpose: rename a plate.
 
 Result fields: `plate_index`, `name`, `revision`.
 
-Errors: `PLATE_NOT_FOUND` (`details.plate_count`), `PLATE_LOCKED`, `INVALID_ARGUMENT` (empty name), `REVISION_CONFLICT`, `BUSY`, `DRIVER_ERROR`.
+Errors: `PLATE_NOT_FOUND` (`details.plate_count`), `INVALID_ARGUMENT` (empty name), `REVISION_CONFLICT`, `BUSY`, `DRIVER_ERROR`.
 
 Example request:
 ```json
@@ -328,7 +330,9 @@ Example output: example pending verification.
 
 ## studio_move_to_plate
 
-Purpose: move one object instance to another plate. Moving to the plate the instance is already on does nothing (`moved: false`, no driver call).
+Purpose: move one object instance to another plate. Moving to the plate the instance is already on does nothing (`moved: false`, no driver call). The destination may already hold instances.
+
+The driver centres the moved instance on the destination plate (its X/Y position becomes the plate centre; Z is kept). Several instances moved to the same plate therefore land on top of each other until you position them (`studio_transform_model`) or call `studio_arrange`. With one instance per plate no arrange is needed.
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
@@ -339,7 +343,7 @@ Purpose: move one object instance to another plate. Moving to the plate the inst
 
 Result fields: `object_id`, `instance_id`, `from_plate_index`, `plate_index`, `moved`, `revision`.
 
-Errors: `OBJECT_NOT_FOUND`, `INSTANCE_REQUIRED` (`details.instances`), `PLATE_NOT_FOUND`, `PLATE_LOCKED`, `PLATE_NOT_EMPTY` (`details.reason` `target_unavailable`), `INVALID_ARGUMENT` (`details.reason` `object_spans_plates`), `REVISION_CONFLICT`, `BUSY`, `DRIVER_ERROR`.
+Errors: `OBJECT_NOT_FOUND`, `INSTANCE_REQUIRED` (`details.instances`), `PLATE_NOT_FOUND`, `PLATE_LOCKED` (the source or the destination plate is locked), `REVISION_CONFLICT`, `BUSY`, `DRIVER_ERROR`.
 
 Example request:
 ```json

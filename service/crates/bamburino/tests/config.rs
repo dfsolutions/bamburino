@@ -74,6 +74,14 @@ fn init_migration_adds_a_missing_allowed_dirs_key_only() {
     assert!(!dir.add_missing_allowed_dirs(&dirs).unwrap());
     assert_eq!(std::fs::read_to_string(dir.config_file()).unwrap(), after);
 
+    // Known Folders resolved to nothing: the key stays absent so a later init retries.
+    let no_key = "listen_port = 28002
+";
+    std::fs::write(dir.config_file(), no_key).unwrap();
+    assert!(!dir.add_missing_allowed_dirs(&[]).unwrap());
+    assert_eq!(std::fs::read_to_string(dir.config_file()).unwrap(), no_key);
+    assert!(dir.add_missing_allowed_dirs(&dirs).unwrap());
+
     // An explicit empty list is the owner's choice: left alone.
     let explicit = "allowed_dirs = []\nlisten_port = 28001\n";
     std::fs::write(dir.config_file(), explicit).unwrap();

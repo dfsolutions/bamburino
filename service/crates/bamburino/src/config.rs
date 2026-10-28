@@ -245,7 +245,9 @@ impl ConfigDir {
     /// returns true. Nothing else in the file is touched (comments and other
     /// keys stay byte for byte) and the file is opened in place, so its ACL
     /// is preserved. A present key, even `allowed_dirs = []`, is left alone
-    /// (returns false), so a second run changes nothing.
+    /// (returns false), so a second run changes nothing. When `dirs` is empty
+    /// (Known Folders resolved to nothing) the key is NOT written, a warning is
+    /// printed and false is returned, so a later `config init` retries.
     pub fn add_missing_allowed_dirs(&self, dirs: &[PathBuf]) -> Result<bool, ConfigError> {
         use std::io::Write;
         let path = self.config_file();
@@ -254,6 +256,15 @@ impl ConfigDir {
         let table: toml::Table =
             toml::from_str(&text).map_err(|e| ConfigError::Parse(format!("{e}")))?;
         if table.contains_key("allowed_dirs") {
+            return Ok(false);
+        }
+        if dirs.is_empty() {
+            // Writing `allowed_dirs = []` would look like the owner's choice and stop every
+            // later `config init` from retrying; leave the key absent instead.
+            eprintln!(
+                "warning: could not resolve your Documents and Downloads folders; allowed_dirs was not added to {}. Run `bamburino config init` again from the user's session.",
+                path.display()
+            );
             return Ok(false);
         }
         #[derive(Serialize)]

@@ -211,6 +211,41 @@ async fn arrange_job_poll_failure_keeps_the_job_id_and_verifies_snapshots() {
 }
 
 #[tokio::test]
+async fn arrange_start_failure_after_select_reports_the_selection_and_snapshot() {
+    let mock = two_plates();
+    mock.fail_tool(
+        DriverTool::ArrangeStart,
+        DriverError::Timeout { after_ms: 5 },
+        1,
+    );
+    let t = tools_with(&mock, LONG);
+    let rev = revision(&t).await;
+    let e = t.studio_arrange(arrange(1, rev)).await.unwrap_err();
+    assert_eq!(e.details["selection_changed"], true, "{e:?}");
+    assert_eq!(e.details["snapshot_taken"], true);
+    let new_rev = e.details["revision"].as_u64().unwrap();
+    assert_ne!(new_rev, rev);
+    assert_eq!(new_rev, revision(&t).await);
+    assert!(e.message.contains("selected"), "{}", e.message);
+    assert_eq!(count(&mock, "plate_select"), 1);
+}
+
+#[tokio::test]
+async fn arrange_start_failure_without_select_says_selection_unchanged() {
+    let mock = two_plates();
+    mock.fail_tool(
+        DriverTool::ArrangeStart,
+        DriverError::Timeout { after_ms: 5 },
+        1,
+    );
+    let t = tools_with(&mock, LONG);
+    let rev = revision(&t).await;
+    let e = t.studio_arrange(arrange(0, rev)).await.unwrap_err();
+    assert_eq!(e.details["selection_changed"], false);
+    assert!(e.details["snapshot_taken"].is_null());
+}
+
+#[tokio::test]
 async fn arrange_poll_failure_revision_matches_the_state_until_the_job_lands() {
     let mock = two_plates();
     mock.fail_tool(DriverTool::JobGet, DriverError::Timeout { after_ms: 5 }, 1);

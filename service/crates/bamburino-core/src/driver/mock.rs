@@ -31,6 +31,14 @@ const OBJECT_ID: &str = "obj-1";
 const INSTANCE_ID: &str = "inst-1";
 /// Edge of the cube every mock object has, in millimetres.
 const CUBE_MM: f64 = 20.0;
+/// Mock plate model: plate `p` is centred at `x = 128 + 300 * p`, `y = 128` (a 256 mm bed plus a
+/// gap). A moved instance is centred there like the real driver does; Z is kept.
+const PLATE_CENTER_Y_MM: f64 = 128.0;
+const PLATE_PITCH_MM: f64 = 300.0;
+
+fn plate_center_x_mm(plate: u32) -> f64 {
+    128.0 + PLATE_PITCH_MM * f64::from(plate)
+}
 /// What `MockArrange::ShiftAndSwapPlates` moves every instance by.
 const SWAP_SHIFT_MM: [f64; 3] = [10.0, 0.0, 0.0];
 /// Magic bytes of the zip container every written 3MF starts with.
@@ -1422,7 +1430,11 @@ impl DriverClient for MockDriver {
         }
         if source != plate_index as i32 {
             st.take_snapshot();
-            st.objects[o].instances[i].plate_index = plate_index as i32;
+            let inst = &mut st.objects[o].instances[i];
+            inst.plate_index = plate_index as i32;
+            // Like the driver (PartPlate::add_instance): centre on the destination plate.
+            inst.position_mm[0] = plate_center_x_mm(plate_index);
+            inst.position_mm[1] = PLATE_CENTER_Y_MM;
         }
         Ok(st.plate_state())
     }

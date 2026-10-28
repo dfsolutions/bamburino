@@ -614,10 +614,10 @@ async fn export_succeeds_with_null_sha256_when_the_file_is_unreadable() {
         .to_string();
     let locked = env.allowed.join("locked");
     std::fs::create_dir_all(&locked).unwrap();
-    if !deny_reading_new_files(&locked) {
-        eprintln!("SKIPPED: cannot set a deny ACE here");
-        return;
-    }
+    assert!(
+        deny_reading_new_files(&locked),
+        "cannot apply the deny ACE with icacls here; this test must not pass without asserting (RF4)"
+    );
     let path = locked.join("plate.gcode.3mf");
     let exported = env.tools.studio_export_plate(export(0, &path, None)).await;
     let saved = env
@@ -627,10 +627,11 @@ async fn export_succeeds_with_null_sha256_when_the_file_is_unreadable() {
     let readable = std::fs::read(&path).map_err(|e| e.kind());
     let on_disk = std::fs::metadata(&path).map(|m| m.len()).ok();
     undo_deny(&locked);
-    if readable != Err(std::io::ErrorKind::PermissionDenied) {
-        eprintln!("SKIPPED: the deny ACE did not block reading ({readable:?})");
-        return;
-    }
+    assert_eq!(
+        readable,
+        Err(std::io::ErrorKind::PermissionDenied),
+        "the deny ACE did not block reading; this test must not pass without asserting (RF4)"
+    );
 
     let r = exported.unwrap();
     assert!(r["sha256"].is_null(), "{r}");

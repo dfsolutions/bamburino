@@ -198,6 +198,7 @@ async fn summary_after_slice_has_time_and_grams() {
     let f = s["filaments"].as_array().unwrap();
     assert_eq!(f.len(), 2);
     assert_eq!(f[0]["index"], 0);
+    assert_eq!(f[0]["slot"], 1);
     assert_eq!(f[0]["grams"], 12.34);
     assert_eq!(f[0]["meters"], 4.5);
     assert_eq!(f[1]["grams"], 0.5);
@@ -470,8 +471,10 @@ async fn ids_come_from_the_header_not_the_position() {
     let f = s["filaments"].as_array().unwrap();
     assert_eq!(f.len(), 2, "{f:?}");
     assert_eq!(f[0]["index"], 1);
+    assert_eq!(f[0]["slot"], 2);
     assert_eq!(f[0]["grams"], 12.34);
     assert_eq!(f[1]["index"], 3);
+    assert_eq!(f[1]["slot"], 4);
     assert_eq!(f[1]["grams"], 0.5);
     assert_eq!(f[1]["meters"], 0.2);
     assert_eq!(s["note"], Value::Null);

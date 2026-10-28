@@ -159,6 +159,9 @@ async fn plate_move_instance_snapshots_only_when_the_plate_changes() {
     let moved = undo_snapshot(&m).await;
     assert_ne!(before, moved);
     assert_eq!(m.instances_on_plate(1).len(), 1);
+    // Centred on plate 1 (x = 128 + 300), Z kept.
+    let pos = m.model_list().await.unwrap()[0].instances[0].position_mm;
+    assert_eq!(pos, [428.0, 128.0, 10.0]);
 
     let rev = m.plate_list().await.unwrap().plate_revision;
     m.plate_move_instance("obj-1", "inst-1", 1, &rev)

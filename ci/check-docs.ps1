@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Checks README.md and docs/*.md (not docs/superpowers/): English only, status vocabulary,
+# Checks README.md and docs/**/*.md (not docs/superpowers/): English only, status vocabulary,
 # no stale Studio version, working relative links, no token-like strings.
 # Usage: pwsh ci/check-docs.ps1 [-Root <repo root>]      exit 0 clean, 1 with a list of problems.
 # Also runs under Windows PowerShell 5.1.
@@ -14,7 +14,11 @@ $files = New-Object System.Collections.Generic.List[string]
 if (Test-Path -LiteralPath (Join-Path $Root 'README.md')) { $files.Add((Join-Path $Root 'README.md')) }
 $docs = Join-Path $Root 'docs'
 if (Test-Path -LiteralPath $docs) {
-    Get-ChildItem -LiteralPath $docs -Filter '*.md' -File | Sort-Object Name | ForEach-Object { $files.Add($_.FullName) }
+    # recursive (docs/recipes/ ...), except docs/superpowers/ (specs and plans)
+    $skip = (Join-Path $docs 'superpowers') + [IO.Path]::DirectorySeparatorChar
+    Get-ChildItem -LiteralPath $docs -Filter '*.md' -File -Recurse |
+        Where-Object { -not $_.FullName.StartsWith($skip, [StringComparison]::OrdinalIgnoreCase) } |
+        Sort-Object FullName | ForEach-Object { $files.Add($_.FullName) }
 }
 
 $italian = @('verificato', 'verificata', 'verificati', 'non eseguito', 'non eseguita', 'manuale', 'fallito', 'fallita',

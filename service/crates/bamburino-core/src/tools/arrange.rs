@@ -96,7 +96,27 @@ impl Tools {
                     .await?;
                 }
                 let before = placements(&drv.model_list().await.map_err(read_error)?);
-                let first = drv.arrange_start().await.map_err(write_error)?;
+                let selected = previous_plate != target;
+                let first = match drv.arrange_start().await {
+                    Ok(job) => job,
+                    Err(e) => {
+                        let mut err = write_error(e);
+                        err.details["selection_changed"] = json!(selected);
+                        if selected {
+                            // plate_select succeeded and took an undo snapshot: the
+                            // project revision moved although no arrange ran.
+                            err.details["snapshot_taken"] = json!(true);
+                            if let Ok(rev) = self.revision.refresh(drv.as_ref()).await {
+                                err.details["revision"] = json!(rev);
+                            }
+                            err.message = format!(
+                                "{} Plate {target} was selected before the failure (one undo snapshot was taken, the revision moved); no arrange ran. Read studio_get_state again.",
+                                err.message
+                            );
+                        }
+                        return Err(err);
+                    }
+                };
                 let waited = wait_job(drv.as_ref(), first.clone(), poll, timeout).await;
                 let (job, poll_error) = match waited {
                     Ok(job) => (job, None),
