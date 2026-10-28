@@ -144,3 +144,5 @@ Attempt 2 ran `prereqs (12 GB) -> fetch skipped (clone exists) -> patch (6 patch
 
 The superseded `8bd194447b99` zip was removed. `pwsh tools/tests/run.ps1`: all 9 PASS. Free on D: afterwards:
 21 GB.
+
+Fallback decision (plan A Task 10): not needed — the PR built on Windows within the 3-round budget; test program needed one extra, test-only round.
