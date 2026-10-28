@@ -357,16 +357,27 @@ async fn capabilities_lists_21_tools_and_the_allowed_dirs() {
     assert_eq!(v["allowed_dirs"], serde_json::json!([]));
 
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
-    let root = std::path::PathBuf::from(root.to_string_lossy().trim_start_matches(r"\?\"));
-    let (guard, excluded) = bamburino_core::pathguard::PathGuard::new(vec![root.clone()]);
+    // The guard normalizes the root itself (no `\\?\` prefix).
+    let (guard, excluded) =
+        bamburino_core::pathguard::PathGuard::new(vec![dir.path().to_path_buf()]);
     assert!(excluded.is_empty(), "{excluded:?}");
+    let want = guard.roots()[0].display().to_string();
     t.set_path_guard(guard);
     let v = t.bamburino_capabilities().await;
     let dirs = v["allowed_dirs"].as_array().unwrap();
     assert_eq!(dirs.len(), 1);
-    let name = root.file_name().unwrap().to_string_lossy().to_string();
-    assert!(dirs[0].as_str().unwrap().ends_with(&name), "{dirs:?}");
+    assert_eq!(dirs[0].as_str().unwrap(), want);
+    assert!(!want.starts_with(r"\\"), "{want}");
+    let name = dir
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    assert!(
+        want.to_lowercase().ends_with(&name.to_lowercase()),
+        "{want}"
+    );
 }
 
 #[tokio::test]

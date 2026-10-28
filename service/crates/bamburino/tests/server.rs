@@ -576,11 +576,11 @@ async fn new_tools_dispatch_and_unknown_fields_are_rejected() {
     );
     let r = s.call("studio_list_filaments", json!({})).await;
     assert_ne!(r["result"]["isError"], true, "{r}");
-    assert!(
-        r["result"]["structuredContent"]["project"].is_object()
-            || r["result"]["structuredContent"]["project"].is_array(),
-        "{r}"
-    );
+    let project = r["result"]["structuredContent"]["project"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{r}"));
+    assert!(!project.is_empty(), "{r}");
+    assert_eq!(project[0]["slot"], 1, "{r}");
     s.shutdown().await;
 }
 
