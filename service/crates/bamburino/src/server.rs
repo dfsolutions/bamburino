@@ -105,7 +105,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool_def::<SetSettingsArgs>(
             "studio_set_settings",
-            "Modifies settings by key (validated against the catalog, dry_run available); requires `expected_revision` from studio_get_state.",
+            "Modifies settings by key (validated against the catalog, dry_run available); requires `expected_revision` from studio_get_state. Known limitation: a single user edit during the write window is indistinguishable from an undo jump and is not caught; the window is bounded by the write duration.",
             false,
         ),
         tool_def::<NoArgs>(
@@ -115,7 +115,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool_def::<TransformArgs>(
             "studio_transform_model",
-            "Modifies an object instance by rotation, translation or scale; requires `expected_revision` from studio_get_state.",
+            "Modifies an object instance by rotation, translation or scale; requires `expected_revision` from studio_get_state. Re-read Euler angles are normalized (Z 270 degrees reads back as -90).",
             false,
         ),
         tool_def::<SupportsArgs>(

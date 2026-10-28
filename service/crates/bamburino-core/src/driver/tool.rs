@@ -72,8 +72,10 @@ impl DriverTool {
         }
     }
 
-    /// True for tools that change editor state; the driver refuses these
-    /// while a modal dialog is open or a job is running. `JobCancel` is a
+    /// True for tools the driver gates as mutations (refused while a modal
+    /// dialog is open or a job is running). `ExportGcode` is one of them: it
+    /// writes a file, not editor state, but it is not in the driver's read
+    /// list (`McpTools.cpp:1482`), so it passes the same BUSY gate. `JobCancel` is a
     /// read in the driver (it bypasses that gate), so it is not listed.
     pub fn is_mutation(&self) -> bool {
         matches!(

@@ -227,7 +227,7 @@ impl Tools {
         Fut: Future<Output = Result<T, ToolError>>,
     {
         let (value, _, revision) = self
-            .guarded_mutation_with(expected_revision, apply, || async { Ok(()) })
+            .guarded_mutation_with(expected_revision, false, apply, || async { Ok(()) })
             .await?;
         Ok((value, revision))
     }
@@ -235,9 +235,14 @@ impl Tools {
     /// Like [`Self::guarded_mutation`], plus `read_back`, which runs inside the
     /// critical section right after the post-mutation refresh. Its result is
     /// returned, and is included in the error when the snapshot check fails.
+    ///
+    /// `dry_run`: `apply` writes nothing, so a snapshot mismatch cannot mean
+    /// that this call changed the project; it is reported as a revision
+    /// mismatch with `outcome: "not_applied"`.
     pub(crate) async fn guarded_mutation_with<F, Fut, T, G, GFut, R>(
         &self,
         expected_revision: u64,
+        dry_run: bool,
         apply: F,
         read_back: G,
     ) -> Result<(T, R, u64), ToolError>
@@ -325,7 +330,11 @@ impl Tools {
         // Immediately after the mutation: see the race-window contract.
         let unverified = |e: DriverError| {
             let mut err = write_error(e);
-            err.details["outcome"] = json!("applied_unverified");
+            err.details["outcome"] = json!(if dry_run {
+                "not_applied"
+            } else {
+                "applied_unverified"
+            });
             err
         };
         let revision = self
@@ -341,6 +350,17 @@ impl Tools {
             .undo_snapshot;
         let n = counting.snapshots.load(Ordering::SeqCst);
         let read = read_back().await;
+        if !snapshot_ok(&before, &after, n) && dry_run {
+            return Err(self
+                .conflict(
+                    "revision_mismatch",
+                    expected_revision,
+                    revision,
+                    "The project changed while the dry run was reading it; nothing was written. Review `details.state` and retry with `details.current`.",
+                    json!({ "outcome": "not_applied" }),
+                )
+                .await);
+        }
         if !snapshot_ok(&before, &after, n) {
             let applied = read.ok().and_then(|r| serde_json::to_value(r).ok());
             return Err(self
@@ -394,6 +414,7 @@ impl Tools {
         let (from, applied, revision) = self
             .guarded_mutation_with(
                 a.expected_revision,
+                dry_run,
                 |drv| self.apply_plan(drv, &plan, dry_run),
                 || async {
                     if dry_run {
@@ -966,6 +987,7 @@ impl Tools {
         let ((instance_id, before, after), reread, revision) = self
             .guarded_mutation_with(
                 a.expected_revision,
+                false,
                 |drv| async move {
                     let models = drv.model_list().await.map_err(read_error)?;
                     let cur = find_instance(&models, &a.object_id, instance_arg)?;

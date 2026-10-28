@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Provisional mapping between [`DriverClient`](super::DriverClient) methods
+//! Mapping between [`DriverClient`](super::DriverClient) methods
 //! and driver tools, plus the driver-side whitelists.
 //!
 //! | `DriverClient` method | Driver tool | Driver arguments |
@@ -18,8 +18,16 @@
 //! | `slice_start` | `slice_start` | `{plateIndex, expectedPlateRevision}`; selected plate only |
 //! | `job_get` / `job_cancel` | `job_get` / `job_cancel` | `{jobId}` |
 //! | `slice_state` | `slice_get_state` | `{}` (`busy`, `valid`, `sliceResultId`, `plateIndex`, `statistics.estimatedNormalTime` -> print time) |
-//! | `preview_summary` | `preview_get_summary` | `{plateIndex, expectedPlateRevision, sliceResultId}`; returns move counts and warnings only. Print time comes from `slice_get_state`; filament usage (grams/meters) and support volume: source TBD by audit (Task 18) |
-//! | `export_gcode` | `export_gcode` | `{plateIndex, expectedPlateRevision, sliceResultId, path, overwrite: false}`; absolute `.gcode` path in an existing directory; the only `export_*` tool on the allowlist. Used by `studio_get_slice_summary` to read grams/meters/volume from the header of a temp file, which is deleted afterwards |
+//! | `preview_summary` | `preview_get_summary` | `{plateIndex, expectedPlateRevision, sliceResultId}`; returns move counts and warnings only. Print time comes from `slice_get_state.statistics.estimatedNormalTime` (dhms string, parsed); filament grams/meters/volume come from `export_gcode` plus the G-code header (`; filament: ids`, `; total filament weight [g] : ...`, etc.) |
+//! | `export_gcode` | `export_gcode` | `{plateIndex, expectedPlateRevision, sliceResultId, path, overwrite: false}`; absolute `.gcode` path in an existing directory; the only `export_*` tool on the allowlist. Used by `studio_get_slice_summary` to read grams/meters/volume from the header of a temp file, which is deleted afterwards. `is_mutation() == true` is correct: the driver's read list (`McpTools.cpp:1482`) does not contain `export.gcode`, so the call passes the same BUSY gate as the other mutations (it writes a file, not editor state, and takes no undo snapshot) |
+//!
+//! Job result shape (`slice_start`, `job_get`, `job_cancel`, `export_gcode`):
+//! `{jobId, plateIndex, status, error{code,message}, result{sliceResultId,reused}}`,
+//! verified against `McpTools.cpp:653-663` (Task 6 review).
+//!
+//! The driver also accepts `scope: "volume"` / `volumeId` in `settings_effective`
+//! and `settings_override`. This is out of the MVP: Bamburino exposes
+//! project, plate and object scopes only.
 //!
 //! `model_import` takes no undo snapshot and is not part of the trait.
 

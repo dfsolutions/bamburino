@@ -482,6 +482,8 @@ async fn dry_run_on_plate_does_not_write() {
     assert_eq!(e.code, ToolErrorCode::PlateNotFound);
 }
 
+type SkipHook = (u32, Box<dyn FnOnce() + Send>);
+
 /// Wraps the mock and injects faults around the write calls.
 struct Flaky {
     inner: Arc<MockDriver>,
@@ -493,6 +495,9 @@ struct Flaky {
     after_update: Option<Box<dyn Fn() + Send + Sync>>,
     /// Runs once, right after the next `app_state` call returned.
     after_app_state: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Runs once, right after the `settings_effective` call that comes after
+    /// `.0` more calls.
+    after_effective: std::sync::Mutex<Option<SkipHook>>,
 }
 
 impl Flaky {
@@ -504,6 +509,7 @@ impl Flaky {
             before_update: None,
             after_update: None,
             after_app_state: std::sync::Mutex::new(None),
+            after_effective: std::sync::Mutex::new(None),
         }
     }
 }
@@ -541,7 +547,22 @@ impl DriverClient for Flaky {
         target: &SettingsTarget,
         keys: Option<&[String]>,
     ) -> Result<Vec<EffectiveSetting>, DriverError> {
-        self.inner.settings_effective(target, keys).await
+        let out = self.inner.settings_effective(target, keys).await;
+        let hook = {
+            let mut g = self.after_effective.lock().unwrap();
+            match g.take() {
+                Some((0, f)) => Some(f),
+                Some((n, f)) => {
+                    *g = Some((n - 1, f));
+                    None
+                }
+                None => None,
+            }
+        };
+        if let Some(f) = hook {
+            f();
+        }
+        out
     }
     async fn settings_update(&self, values: &BTreeMap<String, String>) -> Result<(), DriverError> {
         if let Some(e) = &self.fail_update {
@@ -832,4 +853,32 @@ async fn snapshot_check_is_skipped_without_driver_support() {
     t.studio_set_settings(args(vec![change("layer_height", json!(0.16))], rev, None))
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn dry_run_snapshot_mismatch_is_not_reported_as_applied() {
+    // Calls to skip: the pre-check revision refresh reads 3 times.
+    const SKIP: u32 = 3;
+    let mock = Arc::new(MockDriver::new());
+    // A first edit so that the driver reports an undo snapshot id.
+    mock.user_edit("wall_loops", "2");
+    let flaky = Arc::new(Flaky::new(&mock));
+    let t = tools_over(flaky.clone());
+    let rev = revision(&t).await;
+    // The user edits while the dry run reads the current values.
+    let m2 = mock.clone();
+    *flaky.after_effective.lock().unwrap() = Some((
+        SKIP,
+        Box::new(move || m2.user_edit("top_shell_layers", "5")),
+    ));
+    let e = t
+        .studio_set_settings(args(demo(), rev, Some(true)))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, ToolErrorCode::RevisionConflict);
+    assert_eq!(e.http_status, 409);
+    assert_eq!(e.details["reason"], "revision_mismatch");
+    assert_eq!(e.details["outcome"], "not_applied");
+    assert!(!e.message.contains("WAS applied"));
+    assert_eq!(writes(&mock), 0);
 }
