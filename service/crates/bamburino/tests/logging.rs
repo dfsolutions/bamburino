@@ -349,6 +349,15 @@ fn a_protected_dir_granting_users_is_reacled_with_its_files() {
             "*S-1-5-32-545:(OI)(CI)R".into(),
         ],
     );
+    // An elevated runner (built-in Administrator) may already carry an
+    // explicit entry for itself: take it out so the owner is really absent.
+    let st = std::process::Command::new("icacls")
+        .arg(&dir)
+        .arg("/remove:g")
+        .arg(format!("*{me}"))
+        .output()
+        .unwrap();
+    assert!(st.status.success());
     let before = security_sddl(&dir).unwrap();
     assert!(
         before.contains("D:P") && before.contains(";;;BU)"),
