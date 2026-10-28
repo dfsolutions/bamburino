@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bamburino_core::detect::FixedProcessProbe;
+use bamburino_core::driver::DriverError;
 use bamburino_core::driver::mock::{MockArrange, MockDriver};
+use bamburino_core::driver::tool::DriverTool;
 use bamburino_core::errors::ToolErrorCode;
 use bamburino_core::tools::{ArrangeArgs, JobArgs, ToolConfig, Tools};
 
@@ -173,4 +175,67 @@ async fn arrange_counts_two_snapshots_when_it_selects_and_one_when_it_does_not()
     let v2 = t.studio_arrange(arrange(1, next)).await.unwrap();
     assert_eq!(v2["revision"].as_u64().unwrap(), revision(&t).await);
     assert_eq!(count(&mock, "plate_select"), 1);
+}
+
+#[tokio::test]
+async fn arrange_reports_the_selection_side_effect() {
+    let mock = two_plates();
+    let t = tools_with(&mock, LONG);
+    let rev = revision(&t).await;
+    let v = t.studio_arrange(arrange(1, rev)).await.unwrap();
+    assert_eq!(v["selected_plate_index"], 1);
+    assert_eq!(v["previous_plate_index"], 0);
+    assert_eq!(v["selected_plate_changed"], true);
+    assert!(v["outcome"].is_null());
+    let next = v["revision"].as_u64().unwrap();
+    let v2 = t.studio_arrange(arrange(1, next)).await.unwrap();
+    assert_eq!(v2["selected_plate_changed"], false);
+}
+
+#[tokio::test]
+async fn arrange_job_poll_failure_keeps_the_job_id_and_verifies_snapshots() {
+    let mock = two_plates();
+    mock.fail_tool(DriverTool::JobGet, DriverError::Timeout { after_ms: 5 }, 1);
+    let t = tools_with(&mock, LONG);
+    let rev = revision(&t).await;
+    let e = t.studio_arrange(arrange(1, rev)).await.unwrap_err();
+    // Not a snapshot conflict: the pipeline verified the two snapshots.
+    assert_ne!(e.code, ToolErrorCode::RevisionConflict);
+    assert_eq!(e.details["outcome"], "job_running_unobserved");
+    let id = e.details["job_id"].as_str().unwrap().to_string();
+    assert!(id.ends_with(":arrange"));
+    assert!(e.details["revision"].is_number());
+    // The caller can still poll the job.
+    let s = t.studio_slice_status(JobArgs { job_id: id }).await.unwrap();
+    assert_eq!(s["status"], "running");
+}
+
+#[tokio::test]
+async fn arrange_timeout_result_names_the_outcome_and_blocks_changes_as_busy() {
+    let mock = two_plates();
+    let t = tools_with(&mock, Duration::from_millis(0));
+    let rev = revision(&t).await;
+    let v = t.studio_arrange(arrange(0, rev)).await.unwrap();
+    assert_eq!(v["outcome"], "timeout_job_running");
+    assert!(v["warning"].as_str().unwrap().contains("studio_get_state"));
+    // The job still runs: another change is refused as BUSY.
+    let next = v["revision"].as_u64().unwrap();
+    let e = t.studio_arrange(arrange(0, next)).await.unwrap_err();
+    assert_eq!(e.code, ToolErrorCode::Busy);
+}
+
+#[tokio::test]
+async fn wait_job_is_bounded_by_the_timeout() {
+    // Zero timeout: no poll. Long timeout: polls until the job ends (the
+    // mock finishes an arrange job at its second poll).
+    let mock = two_plates();
+    let t = tools_with(&mock, Duration::from_millis(0));
+    let rev = revision(&t).await;
+    t.studio_arrange(arrange(0, rev)).await.unwrap();
+    assert_eq!(count(&mock, "job_get"), 0);
+    let mock = two_plates();
+    let t = tools_with(&mock, LONG);
+    let rev = revision(&t).await;
+    t.studio_arrange(arrange(0, rev)).await.unwrap();
+    assert_eq!(count(&mock, "job_get"), 2);
 }

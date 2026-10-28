@@ -244,8 +244,10 @@ pub struct MoveToPlateArgs {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ArrangeArgs {
-    /// Plate to select before arranging, 0-based. The driver arranges the
-    /// whole project (`scope: "project"`), so objects may move to other plates.
+    /// Plate to select before arranging, 0-based. SIDE EFFECT: that plate
+    /// stays selected afterwards (the result reports `previous_plate_index`).
+    /// The driver arranges the whole project (`scope: "project"`) whichever
+    /// plate is selected, so objects may move to other plates.
     pub plate_index: u32,
     /// Revision from `studio_get_state`; the call is refused when stale.
     pub expected_revision: u64,

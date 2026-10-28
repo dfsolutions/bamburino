@@ -6,6 +6,9 @@
 //! 785-794, default `prepare_all`), so instances may leave their plate. The
 //! result says `scope: "project"` and lists those moves separately. Whether
 //! the driver can arrange a single plate is unconfirmed (acceptance row P5).
+//! Side effect: the call selects `plate_index` (one undo snapshot, visible in
+//! Studio) and leaves it selected; the result reports the previous selection.
+//! The driver arranges the whole project whichever plate is selected.
 //! All positions come from `model_list` before and after the job.
 
 use std::collections::HashMap;
@@ -67,6 +70,10 @@ fn diff(before: &Placement, after: &[ModelObject]) -> (Vec<Value>, Vec<Value>) {
 
 struct Outcome {
     job: DriverJob,
+    /// Plate selected before the call.
+    previous_plate: u32,
+    /// A `job_get` failure while waiting; the job itself keeps running.
+    poll_error: Option<ToolError>,
     moved: Vec<Value>,
     between: Vec<Value>,
 }
@@ -80,6 +87,7 @@ impl Tools {
             .guarded_mutation(a.expected_revision, |drv| async move {
                 let list = drv.plate_list().await.map_err(read_error)?;
                 check_plate(&list, target)?;
+                let previous_plate = list.selected_index;
                 if list.selected_index != target {
                     with_plate_revision(&drv, |rev| {
                         let drv = drv.clone();
@@ -89,9 +97,13 @@ impl Tools {
                 }
                 let before = placements(&drv.model_list().await.map_err(read_error)?);
                 let first = drv.arrange_start().await.map_err(write_error)?;
-                let job = wait_job(drv.as_ref(), first, poll, timeout)
-                    .await
-                    .map_err(write_error)?;
+                let waited = wait_job(drv.as_ref(), first.clone(), poll, timeout).await;
+                let (job, poll_error) = match waited {
+                    Ok(job) => (job, None),
+                    // The job runs in Studio whatever the poll did: keep its
+                    // id, and still refresh/verify like the success path.
+                    Err(e) => (first, Some(write_error(e))),
+                };
                 let after = drv.model_list().await.map_err(read_error)?;
                 let (moved, between) = diff(&before, &after);
                 // A failed job is returned as a value, not an error, so the
@@ -99,6 +111,8 @@ impl Tools {
                 // snapshots (arrange_start took one either way).
                 Ok(Outcome {
                     job,
+                    previous_plate,
+                    poll_error,
                     moved,
                     between,
                 })
@@ -106,6 +120,8 @@ impl Tools {
             .await?;
         let Outcome {
             job,
+            previous_plate,
+            poll_error,
             moved,
             between,
         } = out;
@@ -115,6 +131,16 @@ impl Tools {
                 jobs.clear();
             }
             jobs.insert(job.id.clone(), target);
+        }
+        if let Some(mut e) = poll_error {
+            e.details["job_id"] = json!(job.id);
+            e.details["outcome"] = json!("job_running_unobserved");
+            e.details["revision"] = json!(revision);
+            e.message = format!(
+                "{} The arrange job {} was started and is probably still running in Bambu Studio; poll it with studio_slice_status or cancel it with studio_cancel_slice, then read studio_get_state again.",
+                e.message, job.id
+            );
+            return Err(e);
         }
         if matches!(
             job.status,
@@ -150,15 +176,20 @@ impl Tools {
         let running = job.status != JobStatus::Succeeded;
         if running {
             warnings.push(format!(
-                "The arrange job {} is still running; poll it with studio_slice_status or cancel it with studio_cancel_slice. The moves listed may be incomplete.",
-                job.id
+                "The arrange job {} is still running (status {}); poll it with studio_slice_status or cancel it with studio_cancel_slice. The moves listed may be incomplete, and the revision will change when the job finishes: read studio_get_state again before the next change (changes are refused as BUSY until then).",
+                job.id,
+                status_name(&job.status)
             ));
         }
         Ok(json!({
             "plate_index": target,
             "job_id": job.id,
-            "status": if running { "running" } else { "succeeded" },
+            "status": if running { status_name(&job.status) } else { "succeeded" },
+            "outcome": if running { json!("timeout_job_running") } else { Value::Null },
             "scope": "project",
+            "selected_plate_index": target,
+            "previous_plate_index": previous_plate,
+            "selected_plate_changed": previous_plate != target,
             "moved": moved,
             "moved_between_plates": between,
             "warning": if warnings.is_empty() { Value::Null } else { json!(warnings.join(" ")) },

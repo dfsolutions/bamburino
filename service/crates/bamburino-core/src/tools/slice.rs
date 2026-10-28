@@ -304,7 +304,8 @@ fn scan_header(path: &Path) -> std::io::Result<HeaderUsage> {
 
 /// Polls `job_get` until the job is terminal or `timeout` has passed and
 /// returns the last job seen. A timeout is not an error: the caller sees a
-/// non-terminal status. With a zero timeout the job is returned unpolled.
+/// non-terminal status. The wait can overshoot `timeout` by up to one `poll`
+/// interval. With a zero timeout the job is returned unpolled.
 pub(crate) async fn wait_job(
     drv: &dyn DriverClient,
     first: DriverJob,
