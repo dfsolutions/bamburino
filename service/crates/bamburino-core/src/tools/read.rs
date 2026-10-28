@@ -15,6 +15,11 @@ use crate::driver::{AppState, EffectiveSetting, ModelObject, SettingSource, Sett
 use crate::errors::{ToolError, ToolErrorCode};
 use crate::validate::Scope;
 
+/// `-0.0` serializes as `-0.0`; an agent reads that as a rotation. Maps it to `0.0`.
+pub(super) fn normalize_zero(v: [f64; 3]) -> [f64; 3] {
+    v.map(|x| if x == 0.0 { 0.0 } else { x })
+}
+
 fn models_json(models: &[ModelObject]) -> Vec<Value> {
     models
         .iter()
@@ -27,7 +32,7 @@ fn models_json(models: &[ModelObject]) -> Vec<Value> {
                         "instance_id": i.id,
                         "plate_id": i.plate_index,
                         "position_mm": i.position_mm,
-                        "rotation_deg": i.rotation_deg,
+                        "rotation_deg": normalize_zero(i.rotation_deg),
                         "scale": i.scale,
                     })
                 })
@@ -105,6 +110,10 @@ impl Tools {
                 v
             }
         };
+        let allowed_dirs: Vec<String> = self
+            .path_guard()
+            .map(|g| g.roots().iter().map(|r| r.display().to_string()).collect())
+            .unwrap_or_default();
         driver["expected_studio_version"] = json!(build_info::STUDIO_VERSION);
         driver["expected_patch_id"] = json!(build_info::EXPECTED_PATCH_ID);
         json!({
@@ -116,6 +125,7 @@ impl Tools {
             },
             "driver": driver,
             "tools": Self::NAMES,
+            "allowed_dirs": allowed_dirs,
             "physical_tools": false,
         })
     }

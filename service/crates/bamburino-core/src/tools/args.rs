@@ -177,7 +177,7 @@ pub struct ListFilamentsArgs {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AssignFilamentArgs {
-    /// Object to assign the filament to (`studio_list_objects`).
+    /// Object to assign the filament to (`studio_list_models`).
     pub object_id: String,
     /// Project filament slot, 1-based, as listed by `studio_list_filaments`.
     pub filament_slot: u32,
@@ -197,7 +197,7 @@ pub struct PlateCreateArgs {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PlateRenameArgs {
-    /// Plate to rename, 0-based (`studio_get_state` `plates[].plate_index`).
+    /// Plate to rename, 0-based (`studio_get_state` `plates[].plate_id`).
     pub plate_index: u32,
     /// New name; must not be empty.
     pub name: String,

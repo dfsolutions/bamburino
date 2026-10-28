@@ -65,8 +65,9 @@ pub struct Tools {
 }
 
 impl Tools {
-    /// The 12 tool names, in the order of the design (section 5).
-    pub const NAMES: [&'static str; 12] = [
+    /// The 21 tool names: the original 12 in the order of the design
+    /// (section 5), then the plate, filament and file tools.
+    pub const NAMES: [&'static str; 21] = [
         "bamburino_capabilities",
         "studio_get_state",
         "studio_get_settings",
@@ -79,6 +80,15 @@ impl Tools {
         "studio_cancel_slice",
         "studio_get_slice_summary",
         "catalog_search",
+        "studio_list_filaments",
+        "studio_assign_filament",
+        "studio_plate_create",
+        "studio_plate_rename",
+        "studio_plate_delete",
+        "studio_move_to_plate",
+        "studio_arrange",
+        "studio_save_project",
+        "studio_export_plate",
     ];
 
     /// `export_dir`: where the driver may write temporary G-code exports. It

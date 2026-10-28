@@ -947,7 +947,11 @@ pub fn compose_rotation_deg(current: [f64; 3], delta: [f64; 3]) -> [f64; 3] {
 }
 
 fn transform_json(i: &Instance) -> Value {
-    json!({ "position_mm": i.position_mm, "rotation_deg": i.rotation_deg, "scale": i.scale })
+    json!({
+        "position_mm": i.position_mm,
+        "rotation_deg": super::read::normalize_zero(i.rotation_deg),
+        "scale": i.scale,
+    })
 }
 
 fn find_instance<'a>(

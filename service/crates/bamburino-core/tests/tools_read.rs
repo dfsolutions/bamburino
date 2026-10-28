@@ -9,7 +9,9 @@ use bamburino_core::detect::FixedProcessProbe;
 use bamburino_core::driver::DriverError;
 use bamburino_core::driver::mock::MockDriver;
 use bamburino_core::errors::ToolErrorCode;
-use bamburino_core::tools::{GetSettingsArgs, SearchArgs, TargetRef, ToolConfig, Tools};
+use bamburino_core::tools::{
+    GetSettingsArgs, SearchArgs, TargetRef, ToolConfig, Tools, Transform, TransformArgs,
+};
 use bamburino_core::validate::Scope;
 use serde_json::Value;
 
@@ -36,7 +38,7 @@ fn setting<'a>(v: &'a Value, key: &str) -> &'a Value {
 }
 
 #[test]
-fn names_are_exact_and_twelve() {
+fn names_are_exact_and_twenty_one() {
     assert_eq!(
         Tools::NAMES,
         [
@@ -52,6 +54,15 @@ fn names_are_exact_and_twelve() {
             "studio_cancel_slice",
             "studio_get_slice_summary",
             "catalog_search",
+            "studio_list_filaments",
+            "studio_assign_filament",
+            "studio_plate_create",
+            "studio_plate_rename",
+            "studio_plate_delete",
+            "studio_move_to_plate",
+            "studio_arrange",
+            "studio_save_project",
+            "studio_export_plate",
         ]
     );
 }
@@ -64,7 +75,7 @@ async fn capabilities_works_with_studio_closed() {
     assert_eq!(v["driver"]["status"], "not_running");
     assert!(v["catalog"]["keys"].as_u64().unwrap() >= 590);
     assert_eq!(v["physical_tools"], false);
-    assert_eq!(v["tools"].as_array().unwrap().len(), 12);
+    assert_eq!(v["tools"].as_array().unwrap().len(), 21);
     assert_eq!(
         v["driver"]["expected_studio_version"],
         build_info::STUDIO_VERSION
@@ -335,4 +346,68 @@ async fn get_state_driver_timeout_reads_as_busy() {
         assert_eq!(e.code, ToolErrorCode::Busy, "skip {n}: {e:?}");
         assert_eq!(e.details["reason"], "driver_timeout", "skip {n}: {e:?}");
     }
+}
+
+#[tokio::test]
+async fn capabilities_lists_21_tools_and_the_allowed_dirs() {
+    let mock = Arc::new(MockDriver::new());
+    let t = tools_with(&mock, true);
+    let v = t.bamburino_capabilities().await;
+    assert_eq!(v["tools"].as_array().unwrap().len(), 21);
+    assert_eq!(v["allowed_dirs"], serde_json::json!([]));
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = std::path::PathBuf::from(root.to_string_lossy().trim_start_matches(r"\?\"));
+    let (guard, excluded) = bamburino_core::pathguard::PathGuard::new(vec![root.clone()]);
+    assert!(excluded.is_empty(), "{excluded:?}");
+    t.set_path_guard(guard);
+    let v = t.bamburino_capabilities().await;
+    let dirs = v["allowed_dirs"].as_array().unwrap();
+    assert_eq!(dirs.len(), 1);
+    let name = root.file_name().unwrap().to_string_lossy().to_string();
+    assert!(dirs[0].as_str().unwrap().ends_with(&name), "{dirs:?}");
+}
+
+#[tokio::test]
+async fn list_models_never_prints_negative_zero() {
+    let mock = Arc::new(MockDriver::new());
+    mock.set_instance_rotation("obj-1", "inst-1", [0.0, -0.0, 90.0]);
+    let m = tools_with(&mock, true).studio_list_models().await.unwrap();
+    assert_eq!(
+        serde_json::to_string(&m["models"][0]["instances"][0]["rotation_deg"]).unwrap(),
+        "[0.0,0.0,90.0]"
+    );
+}
+
+#[tokio::test]
+async fn transform_before_and_reread_never_print_negative_zero() {
+    let mock = Arc::new(MockDriver::new());
+    mock.set_instance_rotation("obj-1", "inst-1", [0.0, -0.0, 90.0]);
+    let t = tools_with(&mock, true);
+    let rev = t.studio_get_state().await.unwrap()["revision"]
+        .as_u64()
+        .unwrap();
+    let r = t
+        .studio_transform_model(TransformArgs {
+            object_id: "obj-1".into(),
+            instance_id: None,
+            transform: Transform {
+                rotate_deg: Some([0.0, 0.0, 90.0]),
+                translate_mm: None,
+                scale: None,
+                mode: None,
+            },
+            expected_revision: rev,
+        })
+        .await
+        .unwrap();
+    for k in ["before", "after", "reread"] {
+        let s = serde_json::to_string(&r[k]["rotation_deg"]).unwrap();
+        assert!(!s.contains("-0"), "{k}: {s}");
+    }
+    assert_eq!(
+        serde_json::to_string(&r["before"]["rotation_deg"]).unwrap(),
+        "[0.0,0.0,90.0]"
+    );
 }

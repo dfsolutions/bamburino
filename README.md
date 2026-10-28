@@ -31,7 +31,7 @@ What it does not do:
  127.0.0.1:27600/mcp   (default listen_port)
  +--------------------------------------------+
  |  bamburino.exe  (Rust, Windows service)    |   the product
- |  12 tools, catalog validation, revision    |
+ |  21 tools, catalog validation, revision    |
  |  conflict check, timeouts, structured      |
  |  errors, version check                     |
  +--------------------------------------------+
@@ -124,7 +124,7 @@ The server also publishes the setting catalog as the resource `bamburino://catal
 
 ## Tools
 
-Twelve tools; input fields, result fields and errors per tool are in [docs/tools.md](docs/tools.md). Read tools never change anything. Mutation tools change the open project (or start a slice) and need Studio open with the right build.
+21 tools; input fields, result fields and errors per tool are in [docs/tools.md](docs/tools.md). Read tools never change anything. Mutation tools change the open project (or start a slice) and need Studio open with the right build.
 
 | Tool | Kind | What it does |
 |---|---|---|
@@ -140,6 +140,15 @@ Twelve tools; input fields, result fields and errors per tool are in [docs/tools
 | `studio_cancel_slice` | mutation | Cancels a running slice job. |
 | `studio_get_slice_summary` | read | Time, filament and layers of the current slice result of a plate. |
 | `catalog_search` | read | Finds setting keys by words of key, label or description. |
+| `studio_list_filaments` | read | Project filament slots (1-based, colour, material) and the AMS trays when a printer with an AMS is reachable. |
+| `studio_assign_filament` | mutation | Sets the filament slot of an object; needs `expected_revision`. |
+| `studio_plate_create` | mutation | Adds a plate, optionally named; needs `expected_revision`. |
+| `studio_plate_rename` | mutation | Renames a plate; needs `expected_revision`. |
+| `studio_plate_delete` | mutation | Deletes a plate (explicit `contents` when it is not empty); needs `expected_revision`. |
+| `studio_move_to_plate` | mutation | Moves an object instance to another plate; needs `expected_revision`. |
+| `studio_arrange` | mutation | Arranges the whole project and waits; needs `expected_revision`. |
+| `studio_save_project` | file | Saves the project `.3mf` inside `allowed_dirs`; never overwrites by default. |
+| `studio_export_plate` | file | Exports the sliced plate as `.gcode.3mf` inside `allowed_dirs`; never overwrites by default. |
 
 An example per tool. The JSON is the tool's input (the agent builds it from your sentence); outputs are described in prose and are not reproduced as verified samples.
 
@@ -203,6 +212,32 @@ For `plate` add `"target": {"plate_id": 1}`; for `object` add `"target": {"objec
 ```
 `limit` defaults to 20, maximum 50. Returns matching keys with type, enum values, range, default and scopes.
 
+**`studio_list_filaments`** - "Which colours does the project have, and what is in the AMS?" Input: `{}` (optional `device_id`). Returns `project[]` with 1-based `slot`, `material`, `color_hex`, and `ams[]` with `unit`, `tray`, `material`, `color_hex`, `remaining`; `ams` is `null` with `ams_unavailable_reason` when no printer or AMS can be read.
+
+**`studio_assign_filament`** - "Make this part red." Input:
+```json
+{ "expected_revision": 123456, "object_id": "<id>", "filament_slot": 2 }
+```
+Slots are 1-based. The value is read back; a mismatch is reported as `DRIVER_ERROR` with `details.outcome` `applied_unverified`.
+
+**`studio_plate_create`** - "Add a plate called Red." Input: `{ "expected_revision": 123456, "name": "Red" }`. Returns the new 0-based `plate_index`.
+
+**`studio_plate_rename`** - "Call plate 1 Blue." Input: `{ "expected_revision": 123456, "plate_index": 1, "name": "Blue" }`.
+
+**`studio_plate_delete`** - "Remove the empty plate." Input: `{ "expected_revision": 123456, "plate_index": 2 }`. A plate with objects needs `"contents": "move"` plus `"target_plate_index"`, or `"contents": "delete"`. Later plates are renumbered: read `studio_get_state` again.
+
+**`studio_move_to_plate`** - "Put this part on plate 1." Input: `{ "expected_revision": 123456, "object_id": "<id>", "plate_index": 1 }`; add `instance_id` when the object has several instances.
+
+**`studio_arrange`** - "Arrange the parts." Input: `{ "expected_revision": 123456, "plate_index": 0 }`. The plate is selected, then Studio arranges the whole project and Bamburino waits; the result lists `moved` and `moved_between_plates`. A job still running at the timeout is reported (`outcome` `timeout_job_running`): poll with `studio_slice_status`.
+
+**`studio_save_project`** - "Save the project to Downloads." Input: `{ "path": "C:\\Users\\<user>\\Downloads\\project.3mf" }`. The path must be absolute and inside `allowed_dirs`; add `"overwrite": true` to replace a file. Returns `bytes` and `sha256`.
+
+**`studio_export_plate`** - "Export the red plate." Input: `{ "plate_index": 0, "path": "C:\\Users\\<user>\\Downloads\\red.gcode.3mf" }`. The plate must have been sliced just before (`NOT_SLICED` otherwise). Returns `bytes` and `sha256`.
+
+### Plates and print hand-off
+
+The plate tools, `studio_arrange` and the two file tools let an agent sort a multi-colour project into one plate per colour and hand you the files. The step-by-step recipe, with the stop rules, is [docs/recipes/one-plate-per-color.md](docs/recipes/one-plate-per-color.md). Printing is out of scope: the exported `.gcode.3mf` files are opened with Bambu Connect or official Bambu Studio, because the patched Studio cannot print. `allowed_dirs` comes from `config.toml` (`bamburino_capabilities` lists it); `--install` run by a different admin account writes that admin's Documents and Downloads folders into it, not the user's.
+
 ### The revision flow
 
 Every mutation carries the `revision` of the last read. If the project changed since (you edited by hand, pressed Ctrl+Z, saved), the call writes nothing and fails with `REVISION_CONFLICT` (status 409) and the current state in `details`. A typical exchange:
@@ -235,6 +270,13 @@ Every failure is `{"error": {"code", "message", "http_status", "details"}}`.
 | `OBJECT_NOT_FOUND`, `PLATE_NOT_FOUND`, `JOB_NOT_FOUND` | The id does not exist. Re-read with `studio_get_state` or `studio_list_models`. |
 | `PARTIALLY_APPLIED` | Some changes were applied and a later one failed; `details` lists both. The applied part is in Studio's undo history. |
 | `INVALID_ARGUMENT` | The input does not match the tool's schema. |
+| `PLATE_NOT_EMPTY` | A plate to delete or to move onto holds instances (`details.reason`). Choose `contents` or an empty target. |
+| `PLATE_LOCKED` | A plate involved is locked in Studio. Unlock it there and retry. |
+| `LAST_PLATE` | The project's only plate cannot be deleted. |
+| `INSTANCE_REQUIRED` | The object has several instances; pass `instance_id`. |
+| `NOT_SLICED` | The plate has no current slice result. Run `studio_slice` for that plate, wait, then export. |
+| `FILE_EXISTS` | The file exists and `overwrite` is not `true`. Choose another name or ask the user. |
+| `PATH_NOT_ALLOWED` | The path is outside `allowed_dirs` or breaks the path rules (`details.reason`). Use a folder from `bamburino_capabilities`. |
 | `DRIVER_ERROR` | The driver returned an error or is unreachable; the message carries the cause. |
 
 ## Limits
@@ -245,8 +287,8 @@ The full list, with reasons, is in [docs/limitations.md](docs/limitations.md). I
 - **Live writes are limited to the 20 keys the driver accepts** (19 of them at plate or object scope; `print_sequence` is project only), even though the catalog describes 603 settings: `layer_height`, `initial_layer_print_height`, `wall_loops`, `top_shell_layers`, `bottom_shell_layers`, `sparse_infill_density`, `sparse_infill_pattern`, `enable_support`, `support_type`, `support_threshold_angle`, `support_on_build_plate_only`, `brim_type`, `brim_width`, `skirt_loops`, `outer_wall_speed`, `inner_wall_speed`, `sparse_infill_speed`, `travel_speed`, `print_sequence`, `seam_position`.
 - No physical or printer actions. Bamburino does not start Studio.
 - The revision is a fingerprint of the state, not a driver counter: a single manual edit during the write window of an agent mutation is indistinguishable from an undo jump and is not detected.
-- Supports per plate are implemented as per-object overrides. No support painting, no lay-on-face, no variants, no filament presets, no multi-plate workflows.
-- No import or export tool: the path rules exist in the service but no tool takes a path yet.
+- Supports per plate are implemented as per-object overrides. No support painting, no lay-on-face, no variants, no filament preset editing.
+- File tools write only inside `allowed_dirs`; there is no import or open tool. Arrange is project-wide, and only one slice result exists at a time (slice and export plate by plate).
 - Print time comes from Studio's estimate string; filament grams and meters come from parsing the header of a temporary exported G-code.
 - Unsigned installers; unofficial build of Bambu Studio.
 
@@ -273,6 +315,15 @@ Per-function and CI status, copied from [docs/verification.md](docs/verification
 | `studio_cancel_slice` | not run | none | - |
 | `studio_get_slice_summary` | not run | none | - |
 | `catalog_search` | not run | none | - |
+| `studio_list_filaments` | not run | none | - |
+| `studio_assign_filament` | not run | none | - |
+| `studio_plate_create` | not run | none | - |
+| `studio_plate_rename` | not run | none | - |
+| `studio_plate_delete` | not run | none | - |
+| `studio_move_to_plate` | not run | none | - |
+| `studio_arrange` | not run | none | - |
+| `studio_save_project` | not run | none | - |
+| `studio_export_plate` | not run | none | - |
 | Install as Windows service | not run | none | - |
 | Ctrl+Z reverts agent changes | manual | acceptance-mvp-service.md steps 4, 4b, 4c | - |
 | Busy while modal dialog is open | manual | acceptance-mvp-service.md step 10 | - |
@@ -298,7 +349,7 @@ Per-function and CI status, copied from [docs/verification.md](docs/verification
 - **Bearer tokens on both layers.** The client token (generated at install) and the driver token (from Studio) are separate. The client token is compared in constant time. Tokens are not logged and not passed as command-line arguments; the driver token is read from stdin.
 - **Host and Origin checks** against DNS rebinding and browser cross-origin requests.
 - **ACLs.** `%ProgramData%\Bamburino\` has a protected DACL: SYSTEM and Administrators full control, the service account read (modify on `logs\`), the installing user read or modify.
-- **Path allowlist.** `allowed_dirs` defaults to Documents and Downloads of the installing user; the path rules reject traversal, UNC, device names, alternate data streams, symlinks and reparse points. Roots and paths must match exactly except for ASCII letter case: the agent should use the folder path exactly as `config.toml` spells it (for example, `Città` is not `CITTÀ`).
+- **Path allowlist.** `allowed_dirs` defaults to Documents and Downloads of the installing user; the path rules reject traversal, UNC, device names, alternate data streams, symlinks and reparse points. Roots and paths must match exactly except for ASCII letter case: the agent should use the folder path exactly as `config.toml` spells it (for example, `Città` is not `CITTÀ`). `--install` run by a different admin account writes that admin's folders into `allowed_dirs`.
 - **No shell, no physical actions.** No command is exposed, and no physical action exists in this version.
 - The service runs as `NT AUTHORITY\LocalService`. The CI self-hosted runner is on demand and takes maintainer pushes only: workflows never trigger on pull requests; a fork PR run must be approved by a maintainer — never approve a run that touches `.github/` ([docs/ci-runner.md](docs/ci-runner.md)).
 
