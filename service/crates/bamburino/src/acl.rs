@@ -99,6 +99,58 @@ pub fn apply_acl(path: &Path, owner_sid: &str, owner_access: OwnerAccess) -> io:
     }
 }
 
+/// Drops every explicit entry of `path` and re-enables inheritance
+/// (`icacls <path> /reset`), so a following [`apply_acl`] starts from a clean
+/// DACL instead of adding to whatever grants an existing object carries.
+#[cfg(windows)]
+pub fn reset_acl(path: &Path) -> io::Result<()> {
+    let out = std::process::Command::new(system32("icacls.exe"))
+        .arg(path)
+        .arg("/reset")
+        .output()?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "icacls /reset failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )))
+    }
+}
+
+/// No-op outside Windows.
+#[cfg(not(windows))]
+pub fn reset_acl(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+/// Makes the files already inside `dir` inherit its (just applied) ACL again
+/// (`icacls <dir>\* /reset /T`). Nothing to do for an empty directory.
+#[cfg(windows)]
+pub fn reset_children_acl(dir: &Path) -> io::Result<()> {
+    if std::fs::read_dir(dir)?.next().is_none() {
+        return Ok(());
+    }
+    let out = std::process::Command::new(system32("icacls.exe"))
+        .arg(dir.join("*"))
+        .args(["/reset", "/T", "/C"])
+        .output()?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "icacls /reset failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )))
+    }
+}
+
+/// No-op outside Windows.
+#[cfg(not(windows))]
+pub fn reset_children_acl(_dir: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 /// No-op outside Windows.
 #[cfg(not(windows))]
 pub fn apply_acl(_path: &Path, owner_sid: &str, _owner_access: OwnerAccess) -> io::Result<()> {

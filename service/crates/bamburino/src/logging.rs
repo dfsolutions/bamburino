@@ -251,19 +251,68 @@ fn level_from_env() -> LevelFilter {
 pub type AclFn<'a> = &'a dyn Fn(&Path, &str) -> io::Result<()>;
 
 fn real_acl(dir: &Path, owner_sid: &str) -> io::Result<()> {
-    crate::acl::apply_acl(dir, owner_sid, crate::acl::OwnerAccess::Modify)
+    // `apply_acl` only adds grants: clear what an existing dir carries first.
+    crate::acl::reset_acl(dir)?;
+    crate::acl::apply_acl(dir, owner_sid, crate::acl::OwnerAccess::Modify)?;
+    crate::acl::reset_children_acl(dir)
 }
 
-/// Whether `dir` already has a protected DACL (no inherited permissions).
-fn dir_protected(dir: &Path) -> bool {
+/// Why an SDDL string (owner + DACL) is not an acceptable log directory ACL:
+/// the DACL must be protected, grant SYSTEM, Administrators, LOCAL SERVICE
+/// and `owner_sid`, and grant nothing to Everyone, Users, Authenticated
+/// Users or Interactive.
+fn sddl_problem(sddl: &str, owner_sid: &str) -> Option<String> {
+    let dacl = sddl.split("D:").nth(1)?;
+    if !dacl.starts_with('P') {
+        return Some("its DACL is not protected".to_owned());
+    }
+    let canon = |t: &str| match t {
+        "S-1-5-18" => "SY".to_owned(),
+        "S-1-5-32-544" => "BA".to_owned(),
+        "S-1-5-19" => "LS".to_owned(),
+        "S-1-1-0" => "WD".to_owned(),
+        "S-1-5-32-545" => "BU".to_owned(),
+        "S-1-5-11" => "AU".to_owned(),
+        "S-1-5-4" => "IU".to_owned(),
+        other => other.to_owned(),
+    };
+    // Each ACE reads `(type;flags;rights;;;trustee)`.
+    let trustees: Vec<String> = dacl
+        .split('(')
+        .skip(1)
+        .filter_map(|ace| ace.trim_end_matches(')').split(';').nth(5).map(canon))
+        .collect();
+    if let Some(t) = trustees
+        .iter()
+        .find(|t| matches!(t.as_str(), "WD" | "BU" | "AU" | "IU"))
+    {
+        return Some(format!("it grants access to a broad group ({t})"));
+    }
+    for need in ["SY", "BA", "LS"]
+        .map(str::to_owned)
+        .into_iter()
+        .chain([canon(owner_sid)])
+    {
+        if !trustees.contains(&need) {
+            return Some(format!("it has no entry for {need}"));
+        }
+    }
+    None
+}
+
+/// Why `dir` does not carry the expected protected ACL, if it does not.
+fn dir_problem(dir: &Path, owner_sid: &str) -> Option<String> {
     #[cfg(windows)]
     {
-        crate::secure::security_sddl(dir).is_ok_and(|s| s.contains("D:P"))
+        match crate::secure::security_sddl(dir) {
+            Err(e) => Some(format!("cannot read its security descriptor: {e}")),
+            Ok(sddl) => sddl_problem(&sddl, owner_sid),
+        }
     }
     #[cfg(not(windows))]
     {
-        let _ = dir;
-        true
+        let _ = (dir, owner_sid);
+        None
     }
 }
 
@@ -280,13 +329,13 @@ fn open_appender(
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     }
-    // Log files inherit the directory ACL; apply it when the directory is new
-    // or its DACL is not protected.
-    if !dir_protected(dir) {
+    // Log files inherit the directory ACL; (re)apply it, with the files
+    // already in the directory, whenever it is not exactly the expected one.
+    if dir_problem(dir, owner_sid).is_some() {
         acl(dir, owner_sid)
             .map_err(|e| format!("cannot restrict access to {}: {e}", dir.display()))?;
-        if !dir_protected(dir) {
-            return Err(format!("{} is still not access-protected", dir.display()));
+        if let Some(why) = dir_problem(dir, owner_sid) {
+            return Err(format!("{} is still not protected: {why}", dir.display()));
         }
     }
     RollingFileAppender::builder()

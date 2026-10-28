@@ -308,3 +308,87 @@ fn redacts_multi_line_input() {
         "line1 <redacted-token>\nAuthorization: Bearer <redacted>\r\nopen <unc-path>\nok"
     );
 }
+
+/// A directory with a protected DACL granting exactly `sids` (icacls form).
+#[cfg(windows)]
+fn protected_dir_granting(dir: &Path, grants: &[String]) {
+    let mut cmd = std::process::Command::new("icacls");
+    cmd.arg(dir).arg("/inheritance:r");
+    for g in grants {
+        cmd.arg("/grant:r").arg(g);
+    }
+    assert!(cmd.output().unwrap().status.success());
+}
+
+#[cfg(windows)]
+#[test]
+fn a_protected_dir_granting_users_is_reacled_with_its_files() {
+    use bamburino::secure::security_sddl;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("logs");
+    std::fs::create_dir(&dir).unwrap();
+    let old = dir.join("bamburino.2020-01-01.log");
+    std::fs::write(&old, "old").unwrap();
+    let me = sid();
+    protected_dir_granting(
+        &dir,
+        &[
+            "*S-1-5-18:(OI)(CI)F".into(),
+            "*S-1-5-32-544:(OI)(CI)F".into(),
+            "*S-1-5-19:(OI)(CI)M".into(),
+            format!("*{me}:(OI)(CI)M"),
+            "*S-1-5-32-545:(OI)(CI)R".into(),
+        ],
+    );
+    let before = security_sddl(&dir).unwrap();
+    assert!(
+        before.contains("D:P") && before.contains(";;;BU)"),
+        "{before}"
+    );
+
+    let (sub, guard) = build_subscriber(&dir, 7, false, &me, Vec::new());
+    tracing::subscriber::with_default(sub, || tracing::info!("x"));
+    drop(guard);
+
+    let after = security_sddl(&dir).unwrap();
+    assert!(
+        !after.contains(";;;BU)") && after.contains("D:P"),
+        "{after}"
+    );
+    assert!(log_files(&dir).len() >= 2, "a new log file was written");
+    let old_sddl = security_sddl(&old).unwrap();
+    assert!(
+        !old_sddl.contains(";;;BU)"),
+        "pre-existing file fixed: {old_sddl}"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_protected_dir_without_the_owner_is_reacled() {
+    use bamburino::secure::security_sddl;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("logs");
+    std::fs::create_dir(&dir).unwrap();
+    // A different (well-formed) owner SID: the configured one is absent.
+    let other = "S-1-5-21-1-2-3-4001";
+    protected_dir_granting(
+        &dir,
+        &[
+            "*S-1-5-18:(OI)(CI)F".into(),
+            "*S-1-5-32-544:(OI)(CI)F".into(),
+            "*S-1-5-19:(OI)(CI)M".into(),
+        ],
+    );
+    let me = sid();
+    assert!(!security_sddl(&dir).unwrap().contains(&format!(";;;{me})")));
+    let (sub, guard) = build_subscriber(&dir, 7, false, &me, Vec::new());
+    tracing::subscriber::with_default(sub, || tracing::info!("x"));
+    drop(guard);
+    let after = security_sddl(&dir).unwrap();
+    assert!(
+        after.contains(&format!(";;;{me})")) && !after.contains(other),
+        "{after}"
+    );
+    assert_eq!(log_files(&dir).len(), 1);
+}
