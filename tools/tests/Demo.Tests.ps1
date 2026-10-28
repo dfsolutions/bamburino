@@ -147,6 +147,16 @@ if ($dry.Log.Count -lt 10) { throw "dry run recorded $($dry.Log.Count) calls" }
 # ---- acceptance file rows
 $tmp = New-TemporaryFile
 Copy-Item "$PSScriptRoot/../../docs/acceptance-mvp-service.md" $tmp -Force
+# The committed file records real runs, so reset the step rows to the skeleton shape (observed 'not run', manual
+# steps 4, 4b, 4c, 10, date '-') before exercising the row parser and Update-AcceptanceRow.
+$skeleton = foreach ($l in (Get-Content $tmp)) {
+    if ($l -match '^\| (\d+|4b|4c) \|') {
+        $c = @($l.Trim().Trim('|').Split('|') | ForEach-Object { $_.Trim() })
+        $res = if ($c[0] -in @('4', '4b', '4c', '10')) { 'manual' } else { 'not run' }
+        "| $($c[0]) | $($c[1]) | $($c[2]) | not run | $res | - |"
+    } else { $l }
+}
+Set-Content -LiteralPath $tmp -Value $skeleton -Encoding utf8
 $rows = (Get-Content $tmp | Where-Object { $_ -match '^\| (\d|4b|4c)' })
 Assert-Eq $rows.Count 12 'skeleton row count'
 foreach ($row in $rows) {

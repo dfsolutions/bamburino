@@ -46,6 +46,9 @@ foreach ($f in $files) {
         foreach ($m in [regex]::Matches($line, '[A-Za-z0-9_-]{32,}')) {
             $v = $m.Value
             if ($v -notmatch '[0-9]' -or $v -notmatch '[A-Za-z]') { continue }
+            # identifier-like (tool names, object/job ids, UUIDs): no uppercase letter. A token from generate_token()
+            # (43 chars of the full base64url alphabet) has none with probability ~(38/64)^43, i.e. never.
+            if ($v -cnotmatch '[A-Z]') { continue }
             if ($v -match '^[0-9a-f]{40}$' -or $v -match '^[0-9a-fA-F]{64}$') { continue }   # git SHA / checksum (64 hex handled above)
             # file-name-like (patch names): every -/_ separated segment is lowercase letters (optionally followed by digits) or digits only
             if ($v -match '[-_]' -and (@($v -split '[-_]') | Where-Object { $_ -notmatch '^([a-z]+[0-9]*|[0-9]+)$' }).Count -eq 0) { continue }

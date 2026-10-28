@@ -66,6 +66,25 @@ try {
         $tmp += $d
         Assert-True ((Invoke-Check $d).Code -eq 0) "$name -> exit 0"
     }
+    # identifier-like strings (tool names, object/job ids, UUIDs) are not secrets
+    $idDoc = "# T`n" +
+        "Tools: ``studio_transform_model``, ``studio_get_slice_summary``, ``bamburino_capabilities_and_versions_report``.`n" +
+        "Object ``obj_a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8:62`` and job ``74f92376-89ce-40c7-b9a4-92347b0e55c6:slice:1``.`n"
+    $d = New-Fixture $idDoc "# Other`n"
+    $tmp += $d
+    $r = Invoke-Check $d
+    Assert-True ($r.Code -eq 0) 'backticked tool names, object ids and UUID job ids are not token-like'
+    if ($r.Code -ne 0) { Write-Host $r.Out }
+    # a synthetic token shaped like generate_token(): 32 random bytes, base64url without padding (43 chars)
+    do {
+        $bytes = New-Object byte[] 32
+        [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+        $synth = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+    } until ($synth -cmatch '[A-Z]' -and $synth -cmatch '[a-z]' -and $synth -match '[0-9]')
+    $d = New-Fixture "# T`nclient token ``$synth`` here`n" "# Other`n"
+    $tmp += $d
+    $r = Invoke-Check $d
+    Assert-True ($r.Code -eq 1 -and $r.Out -match 'token-like') 'a generate_token()-shaped string (mixed case, digits, 43 chars) is still reported'
     $d = New-Fixture "# T`n" "# Other`n"
     $tmp += $d
     [IO.File]::WriteAllText((Join-Path $d 'docs/driver-build-log.md'), "| Step | Outcome |`n|---|---|`n| a | built, 12 warnings |`n")
