@@ -213,7 +213,7 @@ fn run_config(cmd: &ConfigCmd, config_dir: Option<PathBuf>) -> i32 {
     let result = match cmd {
         ConfigCmd::Init => init_config(&dir),
         ConfigCmd::SetDriverToken => set_driver_token(&dir, explicit),
-        ConfigCmd::RotateClientToken => rotate_client_token(&dir),
+        ConfigCmd::RotateClientToken => rotate_client_token(&dir, explicit),
         ConfigCmd::ClientSnippet { client } => client_snippet(&dir, *client),
     };
     match result {
@@ -272,20 +272,45 @@ fn set_driver_token(dir: &ConfigDir, explicit: bool) -> Result<(), ConfigError> 
 }
 
 /// Replaces `client.token` with a fresh token (temp file + rename, same ACL
-/// rules as `config init`). Fails if the token file does not exist yet. The
-/// token is never printed.
-fn rotate_client_token(dir: &ConfigDir) -> Result<(), ConfigError> {
+/// rules as `config init`). Fails if the installation does not exist yet. The
+/// token is never printed. Outside an explicit `--config-dir` the root is
+/// vetted like `init` does (owner SYSTEM/Administrators, protected DACL, no
+/// reparse point) before anything is written.
+fn rotate_client_token(dir: &ConfigDir, explicit: bool) -> Result<(), ConfigError> {
     use bamburino::acl::{OwnerAccess, apply_acl, current_user_sid};
     use bamburino::secrets::{generate_token, read_secret, write_secret_atomic};
+    use bamburino::secure::root_problem;
 
-    let cfg = Config::load(dir)?;
     let path = dir.client_token_file();
-    let io = |e: std::io::Error| ConfigError::Io(path.clone(), e.to_string());
-    if read_secret(&path).map_err(io)?.is_none() {
-        return Err(ConfigError::Invalid(format!(
-            "{} is missing or empty: run `bamburino config init` (or `--install`) first",
+    let no_install = || {
+        ConfigError::Invalid(format!(
+            "{} is missing or empty: run `bamburino config init` (or `--install`) from an elevated prompt first",
             path.display()
+        ))
+    };
+    let io = |e: std::io::Error| {
+        let hint = if e.kind() == std::io::ErrorKind::PermissionDenied {
+            " (rotating the token needs an elevated Administrator prompt)"
+        } else {
+            ""
+        };
+        ConfigError::Io(path.clone(), format!("{e}{hint}"))
+    };
+    if !dir.0.exists() {
+        return Err(no_install());
+    }
+    if !explicit && let Some(problem) = root_problem(&dir.0) {
+        return Err(ConfigError::Invalid(format!(
+            "refusing to use {}: {problem}. Remove or fix the directory as Administrator and run `bamburino config init` again",
+            dir.0.display()
         )));
+    }
+    let cfg = match Config::load(dir) {
+        Err(ConfigError::Missing(_)) => return Err(no_install()),
+        other => other?,
+    };
+    if read_secret(&path).map_err(io)?.is_none() {
+        return Err(no_install());
     }
     let sid = match cfg.owner_sid {
         Some(s) => s,
@@ -294,7 +319,7 @@ fn rotate_client_token(dir: &ConfigDir) -> Result<(), ConfigError> {
     write_secret_atomic(&path, &generate_token(), &sid).map_err(io)?;
     apply_acl(&path, &sid, OwnerAccess::Read).map_err(io)?;
     println!(
-        "Client token rotated. Restart the Bamburino service and update your MCP client (run `bamburino config client-snippet` in a terminal, not inside an AI session)."
+        "Client token rotated. The old token stays valid until the Bamburino service is restarted: restart it now, then update your MCP client (run `bamburino config client-snippet` in a terminal, not inside an AI session)."
     );
     Ok(())
 }

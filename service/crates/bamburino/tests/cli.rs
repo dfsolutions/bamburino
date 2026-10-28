@@ -331,6 +331,10 @@ fn rotate_client_token_replaces_the_token_without_printing_it() {
     let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
     assert!(stdout.contains("Client token rotated."), "{stdout}");
     assert!(stdout.contains("not inside an AI session"), "{stdout}");
+    assert!(
+        stdout.contains("old token stays valid until the Bamburino service is restarted"),
+        "{stdout}"
+    );
     // a second rotation changes it again, and no temp file is left behind
     rotate(dir.path()).success();
     assert_ne!(std::fs::read_to_string(&file).unwrap().trim(), new);
@@ -344,6 +348,40 @@ fn rotate_client_token_fails_without_an_existing_token() {
     let out = rotate(dir.path()).failure().code(1);
     assert!(both_streams(&out).contains("config init"));
     assert!(!dir.path().join("client.token").exists());
+}
+
+#[test]
+fn rotate_client_token_without_config_suggests_init() {
+    let empty = tempfile::tempdir().unwrap();
+    let out = rotate(empty.path()).failure().code(1);
+    assert!(both_streams(&out).contains("config init"));
+    let missing = empty.path().join("nope");
+    let out = rotate(&missing).failure().code(1);
+    assert!(both_streams(&out).contains("config init"));
+    assert!(!missing.exists());
+}
+
+/// Without `--config-dir` the root is the one under `PROGRAMDATA`: a
+/// directory that is not a locked-down root must be refused, untouched.
+#[cfg(windows)]
+#[test]
+fn rotate_client_token_refuses_an_untrusted_root() {
+    let pd = tempfile::tempdir().unwrap();
+    let root = pd.path().join("Bamburino");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("config.toml"), "").unwrap();
+    std::fs::write(root.join("client.token"), CLIENT_TOKEN).unwrap();
+    let out = bamburino()
+        .args(["config", "rotate-client-token"])
+        .env("PROGRAMDATA", pd.path())
+        .assert()
+        .failure()
+        .code(1);
+    assert!(both_streams(&out).contains("refusing to use"));
+    assert_eq!(
+        std::fs::read_to_string(root.join("client.token")).unwrap(),
+        CLIENT_TOKEN
+    );
 }
 
 /// Manual, elevated: see the Task 16 report for the procedure.

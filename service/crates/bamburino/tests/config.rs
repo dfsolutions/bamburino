@@ -214,6 +214,47 @@ fn acl_grants_only_expected_principals() {
     );
 }
 
+/// The token file written by `config rotate-client-token` has the same ACL
+/// as the one `init` creates (`apply_acl(.., Read)`): protected DACL, SY, BA,
+/// LS and the owner, all allow ACEs, LOCAL SERVICE read only.
+#[cfg(windows)]
+#[test]
+fn rotated_client_token_has_the_init_acl() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("config.toml"), "").unwrap();
+    let p = tmp.path().join("client.token");
+    std::fs::write(&p, "old").unwrap();
+    let st = std::process::Command::new(env!("CARGO_BIN_EXE_bamburino"))
+        .args(["config", "rotate-client-token", "--config-dir"])
+        .arg(tmp.path())
+        .output()
+        .unwrap();
+    assert!(st.status.success(), "{st:?}");
+    let sddl = sddl_of(&p);
+    assert!(sddl.contains("D:P"), "DACL must be protected: {sddl}");
+    let aces = aces(&sddl);
+    assert_eq!(aces.len(), 4, "unexpected ACL: {sddl}");
+    let mut trustees: Vec<String> = aces
+        .iter()
+        .map(|a| canonical_trustee(a.rsplit(';').next().unwrap()))
+        .collect();
+    trustees.sort();
+    let mut expected = vec![
+        "SY".to_owned(),
+        "BA".to_owned(),
+        "LS".to_owned(),
+        canonical_trustee(&sid()),
+    ];
+    expected.sort();
+    assert_eq!(trustees, expected, "{sddl}");
+    assert!(aces.iter().all(|a| a.starts_with("A;")), "{sddl}");
+    let ls = aces.iter().find(|a| a.ends_with(";LS")).unwrap();
+    assert!(
+        ls.contains("FR") && !ls.contains("FW") && !ls.contains("FA"),
+        "{ls}"
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn acl_on_logs_dir_gives_local_service_modify() {
