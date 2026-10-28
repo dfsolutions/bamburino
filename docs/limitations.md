@@ -40,4 +40,4 @@ See [architecture.md](architecture.md) for the model. The gaps:
 
 ## Verification
 
-Per-function status is recorded in `docs/verification.md` (not published yet). Until a function appears there as `verified`, it is `not run`.
+Per-function status will be recorded in `docs/verification.md`, which does not exist yet. Until a function appears there as `verified`, it is `not run`.

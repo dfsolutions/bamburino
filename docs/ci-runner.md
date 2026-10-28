@@ -91,12 +91,12 @@ repository settings below, which keep untrusted code away from the runner.
 ## Repository settings
 
 Applied and verified by `ci/runner/secure-repo.ps1` (also called by `register.ps1`), through the REST
-API with the `repo`-scoped token. Result of the first run, 2026-10-27:
+API with the `repo`-scoped token. Result of the first run, 2026-10-27 (each setting was applied if needed and read back with GET; the Result column says `verified` when the read-back matched):
 
 | Setting | Endpoint | Before | After | Result |
 |---|---|---|---|---|
-| Fork PR workflows: require approval for all external contributors | `PUT /repos/dfsolutions/bamburino/actions/permissions/fork-pr-contributor-approval` (`approval_policy=all_external_contributors`) | `first_time_contributors` | `all_external_contributors` | applied, verified by GET |
-| Default workflow permissions `read`, Actions cannot approve PRs | `PUT /repos/dfsolutions/bamburino/actions/permissions/workflow` | `read`, `can_approve_pull_request_reviews=false` | unchanged | already set, verified by GET |
+| Fork PR workflows: require approval for all external contributors | `PUT /repos/dfsolutions/bamburino/actions/permissions/fork-pr-contributor-approval` (`approval_policy=all_external_contributors`) | `first_time_contributors` | `all_external_contributors` | verified |
+| Default workflow permissions `read`, Actions cannot approve PRs | `PUT /repos/dfsolutions/bamburino/actions/permissions/workflow` | `read`, `can_approve_pull_request_reviews=false` | unchanged | verified |
 
 Both endpoints worked with a `repo`-scoped PAT. If a future run reports `forbidden-by-scope`, set
 by hand in Settings > Actions > General: *Fork pull request workflows from outside collaborators* >

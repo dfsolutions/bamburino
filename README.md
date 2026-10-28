@@ -66,18 +66,18 @@ See [docs/architecture.md](docs/architecture.md) for the details.
 Bamburino needs its own build of Bambu Studio `v02.08.04.57` with the driver patch. The official build does not contain the driver.
 
 1. Download the Studio zip from the GitHub release, `BambuStudio-bamburino-02.08.04.57-<patch_id>-win64.zip`, and its `.sha256` file. Check the hash (`Get-FileHash` in PowerShell, compare with the `.sha256` file).
-2. Extract the zip. Run the installer script that ships inside it, from PowerShell (no administrator rights needed):
+2. Extract the zip anywhere (for example your Downloads folder). Open **Windows PowerShell** (`powershell`, version 5.1, present on every Windows 10/11; `pwsh` 7 also works) in the extracted folder and run the installer script that ships inside the zip, no administrator rights needed:
 
    ```powershell
-   pwsh .\install-studio.ps1 -Zip <path to the zip>
+   powershell -ExecutionPolicy Bypass -File .\install-studio.ps1
    ```
 
-   Without `-Zip` the script installs from the folder it sits in. `-Uninstall` removes the folder and the shortcut. It installs to `%LOCALAPPDATA%\Programs\BambuStudio-Bamburino` and creates the Start Menu shortcut "Bambu Studio (Bamburino)".
+   `-ExecutionPolicy Bypass` is there because a script downloaded from the internet is otherwise blocked by default. Run from its own folder, the script installs from that folder to `%LOCALAPPDATA%\Programs\BambuStudio-Bamburino` and creates the Start Menu shortcut "Bambu Studio (Bamburino)". `-Uninstall` removes the folder and the shortcut. (The script also has a `-Zip <path>` option that extracts and checks the `.sha256` file next to the zip itself; it needs the script from outside the zip, so the path above is the one to follow.) The script parses cleanly under Windows PowerShell 5.1; a full install run under 5.1 is `not run`.
 3. **SmartScreen.** The build is not code-signed, so Windows SmartScreen warns about an unknown publisher. This is expected: choose "More info", then "Run anyway". Code signing is outside the MVP.
 4. **Shared profile.** Your settings, presets and login live in `%APPDATA%\BambuStudio`, shared with the official Bambu Studio (it is the same code). The installer never touches that folder.
 5. **Do not keep the official Studio and the Bamburino build open at the same time.** Studio's single-instance check can make the two instances interfere.
 6. Start "Bambu Studio (Bamburino)", open **Preferences > Local MCP server**, and switch it on. The panel shows the **port** (default 27183) and the **token**. You paste the token into the service in the next step. Treat it like a password.
-7. If the server does not start on the default port, see the FAQ: some PCs reserve that TCP range (Hyper-V / WinNAT). Use another port, for example 27601, in the same Preferences panel.
+7. If the server does not start on the default port, see the FAQ: some PCs reserve that TCP range (Hyper-V / WinNAT). Use another port, such as 27601 (an example, not a requirement), in the same Preferences panel.
 
 ## Install the Bamburino service
 
@@ -85,7 +85,7 @@ Bamburino needs its own build of Bambu Studio `v02.08.04.57` with the driver pat
 2. Open PowerShell **as Administrator** in the extracted folder and run:
 
    ```powershell
-   .\install.ps1
+   powershell -ExecutionPolicy Bypass -File .\install.ps1
    ```
 
    It runs `bamburino.exe --install`: the exe is copied to `%ProgramFiles%\Bamburino\`, a Windows service `Bamburino` (display name "Bamburino MCP bridge", automatic delayed start) is registered under `NT AUTHORITY\LocalService`, and the configuration is created in `%ProgramData%\Bamburino\` (a client token is generated there; Documents and Downloads of the installing user go into `allowed_dirs`). The command is idempotent. If you elevate with an account other than your own, that account becomes the owner of the configuration.
@@ -98,7 +98,7 @@ Bamburino needs its own build of Bambu Studio `v02.08.04.57` with the driver pat
    Paste the token and press Enter. The service picks it up without a restart.
 4. If your Studio driver does not listen on the default port, set `driver_url` in `%ProgramData%\Bamburino\config.toml` (default `http://127.0.0.1:27183/mcp`) and restart the service.
 
-Without a service (foreground, for a try-out): `bamburino.exe --run --config-dir <dir>` creates the config in `<dir>` if it is missing and stops with Ctrl+C. To remove the service, from an elevated shell: `bamburino.exe --uninstall` (add `--purge` to delete the configuration too). `bamburino.exe --version` prints the service version, the catalog version and the expected driver patch. `bamburino.exe --help` lists every command.
+Without a service (foreground, for a try-out): `bamburino.exe --run --config-dir <dir>` creates the config in `<dir>` if it is missing and stops with Ctrl+C. To remove the service, from an elevated shell: `bamburino.exe --uninstall` (add `--purge` to delete the configuration too). `bamburino.exe --version` prints the service version, the catalog version and the expected driver patch. Run `bamburino.exe --help` to see the commands of your version.
 
 Keys in `config.toml`: `listen_port` (default 27600), `driver_url`, `read_timeout_ms`, `mutation_timeout_ms` (default and minimum 35000), `poll_interval_ms`, `allow_version_mismatch`, `allowed_dirs`, `log_retention_days`.
 
@@ -122,7 +122,7 @@ The server also publishes the setting catalog as the resource `bamburino://catal
 
 ## Tools
 
-Twelve tools. Read tools never change anything. Mutation tools change the open project (or start a slice) and need Studio open with the right build.
+Twelve tools; input fields, result fields and errors per tool are in [docs/tools.md](docs/tools.md). Read tools never change anything. Mutation tools change the open project (or start a slice) and need Studio open with the right build.
 
 | Tool | Kind | What it does |
 |---|---|---|
@@ -252,7 +252,9 @@ The full list, with reasons, is in [docs/limitations.md](docs/limitations.md). I
 
 Vocabulary: `verified | failed | not run | manual`. Nothing is called verified unless it was executed and its result recorded.
 
-The per-function status is recorded in `docs/verification.md`, generated from the acceptance runs. It is not published yet (placeholder). Until it is, treat every function as `not run`. Nothing in this table is marked verified unless it was executed; see the linked reports.
+<!-- verification:start -->
+Not generated yet — see docs/verification.md after the first verification run (Task 5).
+<!-- verification:end -->
 
 ## Security
 
@@ -277,11 +279,11 @@ No code from `DMontgomery40/bambu-printer-mcp` (GPL-2.0) is included.
 
 ## Contributing and upstream
 
-The driver is the upstream pull request #12485, not a fork with its own life. Our extra patches are small, and each one states whether we propose it upstream. The aim is to contribute the Windows build fixes and the undo-snapshot exposure back to PR #12485. Issues and pull requests are welcome; run `pwsh ci/check-repo.ps1` before sending one.
+The driver is the upstream pull request #12485, not a fork with its own life. Our extra patches are small, and each one states whether we propose it upstream. Each patch is listed with its reason and with whether we propose it upstream in `docs/driver-divergences.md` (on the driver branch; links into `driver/` and `catalog/` resolve after that branch is merged). Issues and pull requests are welcome; run `pwsh ci/check-repo.ps1` before sending one.
 
 ## FAQ and troubleshooting
 
-**Error 10013 when the service or the driver binds a port.** Windows (Hyper-V / WinNAT) can reserve whole TCP ranges. List them with `netsh int ipv4 show excludedportrange protocol=tcp`. If your port is inside a range, change it: `listen_port` in `%ProgramData%\Bamburino\config.toml` for the service, the port in Studio's Preferences > Local MCP server for the driver (for example 27601), then update `driver_url` to match and restart the service. `--install` and `config init` check this and say so.
+**Error 10013 when the service or the driver binds a port.** Windows (Hyper-V / WinNAT) can reserve whole TCP ranges. List them with `netsh int ipv4 show excludedportrange protocol=tcp`. If your port is inside a range, change it: `listen_port` in `%ProgramData%\Bamburino\config.toml` for the service, the port in Studio's Preferences > Local MCP server for the driver (27601 is only an example; any free port outside the reserved ranges will do), then update `driver_url` to match and restart the service. `--install` and `config init` check this and say so.
 
 **SmartScreen blocks the installer.** The build is unsigned. "More info", then "Run anyway".
 

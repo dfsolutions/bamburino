@@ -9,7 +9,7 @@ $required = @('.gitignore', '.gitattributes', 'LICENSE', 'NOTICE.md', 'README.md
     'ci/runner/start.ps1', 'ci/runner/stop.ps1', 'ci/runner/tests/run.ps1',
     'ci/runner/tests/Runner.Tests.ps1', 'docs/ci-runner.md',
     'ci/package-service.ps1', 'ci/service-install.ps1', 'ci/install-studio.ps1', 'ci/tests/Package.Tests.ps1',
-    'ci/tests/Workflows.Tests.ps1', '.github/workflows/build-service.yml', '.github/workflows/build-studio.yml',
+    'ci/tests/Workflows.Tests.ps1', 'ci/check-docs.ps1', 'ci/tests/CheckDocs.Tests.ps1', 'docs/architecture.md', 'docs/limitations.md', 'docs/tools.md', '.github/workflows/build-service.yml', '.github/workflows/build-studio.yml',
     '.github/workflows/release.yml', 'service/.gitkeep', 'catalog/.gitkeep', 'docs/.gitkeep')
 foreach ($f in $required) {
     if (-not (Test-Path -LiteralPath $f)) { $problems.Add("missing file: $f") }
