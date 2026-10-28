@@ -6,6 +6,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use bamburino::logging::{self, Redactor, build_subscriber, build_subscriber_with_acl, redact};
+#[cfg(windows)]
+use bamburino::secure::canonical_trustee;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 
@@ -262,7 +264,12 @@ fn logs_dir_and_log_file_carry_the_protected_dacl() {
     }
     let d = security_sddl(&dir).unwrap();
     assert!(d.contains("D:P"), "{d}");
-    for who in [";;;SY)", ";;;BA)", ";;;LS)", &format!(";;;{me})")] {
+    for who in [
+        ";;;SY)",
+        ";;;BA)",
+        ";;;LS)",
+        &format!(";;;{})", canonical_trustee(&me)),
+    ] {
         assert!(d.contains(who), "{who} missing: {d}");
     }
     assert!(
@@ -275,7 +282,9 @@ fn logs_dir_and_log_file_carry_the_protected_dacl() {
     let file = log_files(&dir)[0].clone();
     let f = security_sddl(&dir.join(file)).unwrap();
     assert!(
-        f.contains(";;;SY)") && f.contains(";;;LS)") && f.contains(&format!(";;;{me})")),
+        f.contains(";;;SY)")
+            && f.contains(";;;LS)")
+            && f.contains(&format!(";;;{})", canonical_trustee(&me))),
         "{f}"
     );
     assert!(
@@ -381,13 +390,17 @@ fn a_protected_dir_without_the_owner_is_reacled() {
         ],
     );
     let me = sid();
-    assert!(!security_sddl(&dir).unwrap().contains(&format!(";;;{me})")));
+    assert!(
+        !security_sddl(&dir)
+            .unwrap()
+            .contains(&format!(";;;{})", canonical_trustee(&me)))
+    );
     let (sub, guard) = build_subscriber(&dir, 7, false, &me, Vec::new());
     tracing::subscriber::with_default(sub, || tracing::info!("x"));
     drop(guard);
     let after = security_sddl(&dir).unwrap();
     assert!(
-        after.contains(&format!(";;;{me})")) && !after.contains(other),
+        after.contains(&format!(";;;{})", canonical_trustee(&me))) && !after.contains(other),
         "{after}"
     );
     assert_eq!(log_files(&dir).len(), 1);
