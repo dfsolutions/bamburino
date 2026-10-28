@@ -50,7 +50,7 @@ jobs:
         run: |
           python -I catalog/fetch_sources.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -I -m unittest catalog/test_build_catalog.py
+          python -I catalog/test_build_catalog.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Format
         working-directory: service

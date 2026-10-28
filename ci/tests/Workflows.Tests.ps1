@@ -34,7 +34,7 @@ foreach ($c in 'cargo fmt --all --check',
     'cargo test --workspace --features bamburino-core/mock',
     'cargo build --release --workspace',
     'python -I catalog/fetch_sources.py',
-    'python -I -m unittest catalog/test_build_catalog.py',
+    'python -I catalog/test_build_catalog.py',
     'ci/package-service.ps1') {
     Assert-True ($svc.Contains($c)) "build-service runs: $c"
 }
@@ -72,6 +72,7 @@ Assert-True ($all -notmatch '(?m)^\s+workflow_run:') 'no workflow_run trigger an
 $studioJob = $std.Substring($std.IndexOf('  studio:'))
 Assert-True ($studioJob -match 'actions/checkout@[0-9a-f]{40} # v\S+\s+with:\s+persist-credentials: false') 'self-hosted checkout sets persist-credentials: false'
 Assert-True ($svc -match '(?m)^\s+run: \|[\s\S]*?pwsh ci/check-repo\.ps1' -and $svc.Contains('pwsh ci/check-docs.ps1') -and $svc.Contains('pwsh ci/check-workflows.ps1 -Path .github/workflows')) 'build-service runs check-repo, check-docs and check-workflows'
+Assert-True ($svc -notmatch 'python\s+-I\s+-m\s+unittest') 'build-service: no `python -I -m unittest` (-I drops the cwd from sys.path; run the test file directly)'
 Assert-True ($svc.IndexOf('pwsh ci/check-repo.ps1') -lt $svc.IndexOf('rustup toolchain install')) 'build-service: repository checks come before the cargo steps'
 Assert-True ($svc -match 'rustup toolchain install' -and $svc -notmatch 'rustup show') 'build-service installs the pinned toolchain (rustup toolchain install)'
 Assert-True ($std -notmatch 'D:\bb\artifacts' -and $std -match 'env\.BAMBURINO_BUILD_ROOT') 'build-studio upload path uses BAMBURINO_BUILD_ROOT'
