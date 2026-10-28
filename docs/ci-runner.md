@@ -109,6 +109,12 @@ by hand in Settings > Actions > General: *Fork pull request workflows from outsi
 contents and packages permissions** with *Allow GitHub Actions to create and approve pull requests*
 unticked. Re-run `pwsh ci/runner/secure-repo.ps1` to verify; it exits non-zero if anything differs.
 
+## Build parallelism
+
+`driver/build.ps1` caps msbuild at `BAMBURINO_MSBUILD_JOBS` (default 8, integer 1..64) for the deps, app and test
+steps. The `build-studio` job inherits that default; set the variable in the workflow `env:` only if a different cap
+is needed on the runner.
+
 ## Tests
 
 `pwsh ci/runner/tests/run.ps1` runs the unit tests (SHA-256 parsing, stop logic with fake processes and API, config arguments without

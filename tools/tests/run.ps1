@@ -2,7 +2,7 @@
 .SYNOPSIS
     Runs tools/tests/*.Tests.ps1.
 .DESCRIPTION
-    Unit tests (Upstream, Patch, Audit, Package) always run: they need no build root and never touch the clone.
+    Unit tests (Upstream, Patch, Audit, Package, BuildArgs) always run: they need no build root and never touch the clone.
     Integration tests (Apply, Identity, Snapshot, App, Deps, Prereqs) run -Step patch on <BuildRoot>\BambuStudio
     (re-applying the patch set) or read the build root. They run when -Integration is passed, or by default when
     <BuildRoot>\BambuStudio exists. In both cases they are refused while a build is running: a cmake.exe process, or
@@ -13,7 +13,7 @@
 [CmdletBinding()]
 param([switch]$Integration)
 Import-Module "$PSScriptRoot/../Upstream.psm1" -Force
-$unit = @('Upstream', 'Patch', 'Audit', 'Package')
+$unit = @('Upstream', 'Patch', 'Audit', 'Package', 'BuildArgs')
 
 function Get-RunningBuild {
     $procs = @(Get-CimInstance Win32_Process -Filter "Name='cmake.exe' OR Name='MSBuild.exe'" -ErrorAction SilentlyContinue)

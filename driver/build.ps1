@@ -23,7 +23,7 @@
                  in-process (Enter-VsEnv, then prereqs.ps1 -Check -Export, so the VS CMake comes first and Strawberry's
                  MinGW bin is off PATH), and in <clone>\deps\build it runs
                  cmake .. -G "Visual Studio 17 2022" -A x64 -DDESTDIR=<BuildRoot>\deps-out -DCMAKE_BUILD_TYPE=Release
-                 -DDEP_DEBUG=OFF, then msbuild /m ALL_BUILD.vcxproj /p:Configuration=Release /v:minimal /nodeReuse:false, with the whole
+                 -DDEP_DEBUG=OFF, then msbuild -m:<jobs> ALL_BUILD.vcxproj /p:Configuration=Release /v:minimal /nodeReuse:false, with the whole
                  output in the step log. The sentinel is written only after both succeed. deps-out is not wiped on a
                  mismatch: deps\build keeps the ExternalProject stamps, so a re-run after a failure resumes there.
                  Touches only <clone>\deps\build (kept by -Step patch) and deps-out, never the rest of the clone.
@@ -34,7 +34,7 @@
                  -DCMAKE_PREFIX_PATH=<BuildRoot>\deps-out\usr\local -DCMAKE_INSTALL_PREFIX=<BuildRoot>\install-dir
                  -DCMAKE_BUILD_TYPE=Release -DWIN10SDK_PATH=<BAMBURINO_WIN10SDK_PATH> <Get-IdentityCMakeDefines>
                  -DPKG_CONFIG_EXECUTABLE=<PKG_CONFIG_EXECUTABLE from prereqs.ps1 -Export>
-                 then cmake --build . --target install --config Release -- -m /v:minimal /nodeReuse:false
+                 then cmake --build . --target install --config Release -- -m:<jobs> /p:CL_MPCount=<jobs> /v:minimal /nodeReuse:false
                  (/nodeReuse:false is an msbuild switch, not a cmake flag, so it goes after '--': no idle MSBuild
                  worker nodes stay behind once the step ends). The configure command line
                  is written to the step log as '== cmake configure: ...'. Exit 40 when configure or build fails or
@@ -67,6 +67,11 @@
     Patch 0100-build-identity.diff writes them into a generated header (bamburino_identity.h, "unknown" when not
     passed) read only by app.get_capabilities (buildSuffix, patchId) and the About dialog; SLIC3R_VERSION and
     version.inc are not changed.
+    Parallelism: every msbuild invocation (deps, app, test) gets -m:<jobs> /p:CL_MPCount=<jobs>, where <jobs> is the
+                 environment variable BAMBURINO_MSBUILD_JOBS (integer 1..64, default 8; anything else is an error).
+                 Without a cap msbuild -m starts one node per logical CPU (20 on the i7-12700K), each running cl.exe
+                 children of 1-2 GB on large translation units, and Windows kills the build when the PC is in use
+                 (cl D8040). CL_MPCount caps /MP inside a project (harmless when a project does not use /MP).
     Exit codes: 0 ok; 20 clone dirty (fetch) or patch does not apply (patch);
                 21 clone at an unexpected state (fetch, patch, deps) or patch_id mismatch (patch);
                 10 prerequisites missing (deps, app, test); 30 cmake configure or msbuild failed (deps);
@@ -81,6 +86,21 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot '..\tools\Upstream.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot '..\tools\Package.psm1') -Force
+
+function Get-MsBuildJobArgs {
+    # msbuild parallelism cap: BAMBURINO_MSBUILD_JOBS (integer 1..64, default 8). Returns '-m:<n>' and the
+    # CL_MPCount property that caps /MP inside projects. Throws on an invalid value.
+    $raw = $env:BAMBURINO_MSBUILD_JOBS
+    $n = 8
+    if (-not [string]::IsNullOrWhiteSpace($raw)) {
+        $t = $raw.Trim()
+        if ($t -notmatch '^[0-9]{1,3}$' -or [int]$t -lt 1 -or [int]$t -gt 64) {
+            throw "BAMBURINO_MSBUILD_JOBS must be an integer 1..64, got '$raw'"
+        }
+        $n = [int]$t
+    }
+    return @("-m:$n", "/p:CL_MPCount=$n")
+}
 
 function Invoke-Git {
     param([Parameter(ValueFromRemainingArguments)][string[]]$GitArgs)
@@ -295,7 +315,7 @@ function Invoke-Deps {
     New-Item -ItemType Directory -Force -Path $buildDir, $out | Out-Null
     $log = Write-StepLog -Step 'deps'
     $cmakeArgs = @('..', '-G', 'Visual Studio 17 2022', '-A', 'x64', "-DDESTDIR=$out", '-DCMAKE_BUILD_TYPE=Release', '-DDEP_DEBUG=OFF')
-    $msbuildArgs = @('/m', 'ALL_BUILD.vcxproj', '/p:Configuration=Release', '/v:minimal', '/nodeReuse:false')
+    $msbuildArgs = @(Get-MsBuildJobArgs) + @('ALL_BUILD.vcxproj', '/p:Configuration=Release', '/v:minimal', '/nodeReuse:false')
     Add-Log $log "== deps tree $key (studio.tag_commit $want)"
     Add-Log $log "== prereqs.ps1 -MinFreeGB $minFree"
     Add-Log $log "== PATH=$env:Path"
@@ -383,7 +403,7 @@ function Invoke-App {
     if (-not $env:PKG_CONFIG_EXECUTABLE) { throw 'PKG_CONFIG_EXECUTABLE not set by prereqs.ps1 -Export' }
     $configureArgs += "-DPKG_CONFIG_EXECUTABLE=$env:PKG_CONFIG_EXECUTABLE"
     # /v:minimal keeps warnings and errors but not the per-file progress, so the log stays small on a full build.
-    $buildArgs = @('--build', '.', '--target', 'install', '--config', 'Release', '--', '-m', '/v:minimal', '/nodeReuse:false')
+    $buildArgs = @('--build', '.', '--target', 'install', '--config', 'Release', '--') + @(Get-MsBuildJobArgs) + @('/v:minimal', '/nodeReuse:false')
     Add-Log $log "== patch_id $($u['driver.patch_id']) on studio.tag_commit $want"
     Add-Log $log "== prereqs.ps1 -MinFreeGB $minFree"
     Add-Log $log "== PATH=$env:Path"
@@ -430,7 +450,7 @@ function Invoke-Test {
     $buildDir = Join-Path $src 'build-mcp-tests'
     $log = Write-StepLog -Step 'test'
     $configureArgs = @('-S', 'tests/mcp', '-B', 'build-mcp-tests', '-G', 'Visual Studio 17 2022', '-A', 'x64', "-DCMAKE_PREFIX_PATH=$prefix")
-    $buildArgs = @('--build', 'build-mcp-tests', '--config', 'Release', '--', '-m', '/v:minimal', '/nodeReuse:false')
+    $buildArgs = @('--build', 'build-mcp-tests', '--config', 'Release', '--') + @(Get-MsBuildJobArgs) + @('/v:minimal', '/nodeReuse:false')
     $ctestArgs = @('-C', 'Release', '--output-on-failure')
     # Run as a script (it calls unittest.main()); 'python -m unittest <path>' would import it as package 'tests.mcp'.
     $pyArgs = @('tests/mcp/test_legacy_contract.py', '-v')

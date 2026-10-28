@@ -164,3 +164,4 @@ Outcome: PR12485-OK (3 rounds + 1 test-program round)
   `D:\bb\BambuStudio` with `-Step patch` or read `D:\bb`) only with `-Integration` or when the clone exists. They
   are refused while a build runs (`cmake.exe`, or an `MSBuild.exe` that is not an idle `/nodemode:` worker): exit 1
   with `-Integration`, SKIP otherwise.
+- `BAMBURINO_MSBUILD_JOBS` (default 8, 1..64) caps `-m:<n>` and `/p:CL_MPCount=<n>` on every msbuild call (`Get-MsBuildJobArgs`): unbounded `-m` on 20 threads started up to 20 `cl.exe` of 1-2 GB each, and with the PC in use (Teams call, VS Code, browser) memory pressure killed the build; the self-hosted CI job died twice on 2026-10-28 at about 13 min with no compile error.
