@@ -1,0 +1,15 @@
+diff --git a/src/slic3r/GUI/McpAdvanced.inc b/src/slic3r/GUI/McpAdvanced.inc
+index 05f5582..ed8a391 100644
+--- a/src/slic3r/GUI/McpAdvanced.inc
++++ b/src/slic3r/GUI/McpAdvanced.inc
+@@ -683,8 +683,8 @@ void register_advanced_handlers(std::map<std::string, Handler>& methods) {
+         auto mesh = Plater::combine_mesh_fff(object, ii, [](const std::string& error) { throw RpcError("NATIVE_ERROR", error); });
+         require(!mesh.empty(), "Object has no exportable geometry");
+         if (destination.extension() == ".stl") {
+-            if (!mesh.write_binary(source.c_str())) throw RpcError("NATIVE_ERROR", "Native STL writer failed");
+-        } else mesh.WriteOBJFile(source.c_str());
++            if (!mesh.write_binary(source.u8string().c_str())) throw RpcError("NATIVE_ERROR", "Native STL writer failed");
++        } else mesh.WriteOBJFile(source.u8string().c_str());
+         const auto bytes = mcp_copy_gcode(source.string(), (directory / "publish.tmp").string(), destination.string(), overwrite, [] { return true; });
+         return {{"path", destination.string()}, {"bytes", bytes}, {"frame", "world"}, {"triangles", mesh.its.indices.size()}};
+     });

@@ -1,0 +1,14 @@
+diff --git a/src/slic3r/GUI/McpTools.cpp b/src/slic3r/GUI/McpTools.cpp
+index a1e3676..32b7804 100644
+--- a/src/slic3r/GUI/McpTools.cpp
++++ b/src/slic3r/GUI/McpTools.cpp
+@@ -471,7 +471,8 @@ Json app_state(Plater& plater) {
+         {"slicingRunning", plater.background_process().running()}, {"modalOpen", modal_open()},
+         {"objectCount", plater.model().objects.size()}, {"plateCount", plater.get_partplate_list().get_plate_count()},
+         {"selectedPlateIndex", plater.get_partplate_list().get_curr_plate_index()},
+-        {"platerView", plater.is_preview_shown() ? "preview" : "prepare"}};
++        {"platerView", plater.is_preview_shown() ? "preview" : "prepare"},
++        {"undoSnapshot", std::to_string(plater.get_active_snapshot_time())}};
+ }
+ 
+ UiJob* find_ui_job(const std::string& id) {

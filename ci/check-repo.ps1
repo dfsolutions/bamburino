@@ -3,7 +3,7 @@ Set-Location $root
 $problems = New-Object System.Collections.Generic.List[string]
 
 $required = @('.gitignore', '.gitattributes', 'LICENSE', 'NOTICE.md', 'README.md',
-    'driver/upstream.toml', 'tools/Upstream.psm1', 'tools/GitHub.psm1',
+    'driver/upstream.toml', 'tools/Upstream.psm1', 'tools/GitHub.psm1', 'tools/Package.psm1',
     'tools/tests/run.ps1', 'tools/tests/Upstream.Tests.ps1', 'ci/check-repo.ps1',
     'service/.gitkeep', 'catalog/.gitkeep', 'docs/.gitkeep')
 foreach ($f in $required) {
