@@ -166,3 +166,10 @@ pub struct SummaryArgs {
     /// that can hold a current slice result.
     pub plate_id: Option<u32>,
 }
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListFilamentsArgs {
+    /// Printer whose AMS to read. Default: the printer selected in Studio.
+    pub device_id: Option<String>,
+}
