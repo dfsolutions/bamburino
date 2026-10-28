@@ -13,7 +13,7 @@ if (-not (Test-Path -LiteralPath $exe)) { Write-Host "bamburino.exe not found ne
 if ($LASTEXITCODE -ne 0) { Write-Host "bamburino.exe --install failed (exit $LASTEXITCODE)"; exit $LASTEXITCODE }
 Write-Host ''
 Write-Host 'Next steps (as your normal user, not elevated):'
-Write-Host '  1. Give the service the driver token from Bambu Studio (Preferences, MCP server):'
+Write-Host '  1. Give the service the driver token from Bambu Studio (Preferences > Local MCP server):'
 Write-Host '       & "$env:ProgramFiles\Bamburino\bamburino.exe" config set-driver-token'
 Write-Host '     (the service picks the token up on its next request, no restart needed)'
 Write-Host '  2. Print the line that registers Bamburino in your MCP client:'

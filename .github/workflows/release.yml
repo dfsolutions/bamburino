@@ -51,12 +51,14 @@ jobs:
           fi
           echo "tag $TAG -> commit $ref_sha"
           check_run() {
-            local id="$1" wf="$2" concl sha name event
+            local id="$1" wf="$2" concl sha name event path
             concl=$(gh run view "$id" --json conclusion --jq .conclusion)
             sha=$(gh run view "$id" --json headSha --jq .headSha)
             name=$(gh run view "$id" --json workflowName --jq .workflowName)
             event=$(gh run view "$id" --json event --jq .event)
             case "$event" in push|workflow_dispatch) ;; *) echo "::error::run $id ($wf) was triggered by '$event', only push or workflow_dispatch runs can be released"; exit 1 ;; esac
+            path=$(gh api "repos/$GH_REPO/actions/runs/$id" --jq .path)
+            [[ "$path" == ".github/workflows/$wf.yml@"* ]] || { echo "::error::run $id has workflow file '$path', expected .github/workflows/$wf.yml"; exit 1; }
             [ "$name" = "$wf" ] || { echo "::error::run $id is workflow '$name', expected '$wf'"; exit 1; }
             [ "$concl" = "success" ] || { echo "::error::run $id ($wf) conclusion is '$concl', expected success"; exit 1; }
             [ "$sha" = "$ref_sha" ] || { echo "::error::run $id ($wf) built $sha, tag $TAG is $ref_sha"; exit 1; }

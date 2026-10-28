@@ -30,9 +30,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pwsh ci/check-workflows.ps1 -Path .github/workflows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Script tests
+        shell: pwsh
+        run: |
+          foreach ($t in 'ci/tests/CheckWorkflows.Tests.ps1', 'ci/tests/Workflows.Tests.ps1', 'ci/tests/Package.Tests.ps1', 'ci/tests/CheckDocs.Tests.ps1', 'ci/runner/tests/run.ps1', 'tools/tests/run.ps1') {
+            pwsh $t
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: Toolchain (installs the version pinned in service/rust-toolchain.toml)
         working-directory: service
-        run: rustup toolchain install
+        run: |
+          rustup toolchain install
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup component add rustfmt clippy
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |

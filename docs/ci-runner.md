@@ -82,8 +82,13 @@ never prints the registration token. The token is visible to local processes on 
 Only workflows that pass `ci/check-workflows.ps1` (fail-closed static guard, enforced in CI):
 
 - triggers are `push` to `main` or tags, never `pull_request`, `pull_request_target` or `workflow_run`;
-- every job starts with the maintainer guard step (`ci/maintainers.txt`);
+- a separate `guard` job gates every self-hosted job via `needs` (maintainer check against `ci/maintainers.txt`);
 - explicit minimal `permissions`.
+
+A job on the self-hosted runner runs with the full rights of the owner's Windows user: the Git
+Credential Manager PAT, SSH keys and open vault sessions are all reachable from a workflow step.
+Hardening that is recommended on top of the guard: `sha_pinning_required` (every action pinned to a
+commit SHA) and `allowed_actions=selected` (only listed actions may run).
 
 The static checker is a safety net, **not** the barrier for fork pull requests. The barrier is the
 repository settings below, which keep untrusted code away from the runner.

@@ -22,10 +22,13 @@ $italian = @('verificato', 'verificata', 'verificati', 'non eseguito', 'non eseg
 $italianRe = '(?i)(?<![\p{L}\p{N}_])(' + (($italian | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')(?![\p{L}\p{N}_])'
 $vocab = @('verified', 'failed', 'not run', 'manual')
 $statusColumns = @('outcome', 'result', 'verification', 'esito')
+# the status vocabulary applies only here (the build log's Outcome column is free text by design)
+$vocabFileRe = '^(README\.md|docs/verification\.md|docs/acceptance-[^/]*\.md)$'
 
 foreach ($f in $files) {
     $rel = $f.Substring($Root.Length).TrimStart('\', '/').Replace('\', '/')
     $dir = Split-Path -Parent $f
+    $checkVocab = $rel -match $vocabFileRe
     $lines = [IO.File]::ReadAllLines($f)
     $inFence = $false
     $statusCol = -1
@@ -36,11 +39,17 @@ foreach ($f in $files) {
 
         if ($line -match $italianRe) { $problems.Add("${rel}:${n} italian marker '$($Matches[1])'") }
         if ($line -match '02\.08\.02\.61') { $problems.Add("${rel}:${n} stale Studio version 02.08.02.61") }
-        foreach ($m in [regex]::Matches($line, '[0-9a-fA-F]{64}')) { $problems.Add("${rel}:${n} token-like string (64 hex)") }
+        # 64 hex is a checksum when the line (or the one before) says sha256 / SHA-256; otherwise it looks like a secret
+        if ($line -notmatch '(?i)sha-?256' -and -not ($i -gt 0 -and $lines[$i - 1] -match '(?i)sha-?256')) {
+            foreach ($m in [regex]::Matches($line, '(?<![0-9A-Za-z])[0-9a-fA-F]{64}(?![0-9A-Za-z])')) { $problems.Add("${rel}:${n} token-like string (64 hex)") }
+        }
         foreach ($m in [regex]::Matches($line, '[A-Za-z0-9_-]{32,}')) {
-            if ($m.Value -match '[0-9]' -and $m.Value -match '[A-Za-z]' -and $m.Value -notmatch '^[0-9a-fA-F]{64}$') {
-                $problems.Add("${rel}:${n} token-like string (base64url, 32+ chars)")
-            }
+            $v = $m.Value
+            if ($v -notmatch '[0-9]' -or $v -notmatch '[A-Za-z]') { continue }
+            if ($v -match '^[0-9a-f]{40}$' -or $v -match '^[0-9a-fA-F]{64}$') { continue }   # git SHA / checksum (64 hex handled above)
+            # file-name-like (patch names): every -/_ separated segment is lowercase letters (optionally followed by digits) or digits only
+            if ($v -match '[-_]' -and (@($v -split '[-_]') | Where-Object { $_ -notmatch '^([a-z]+[0-9]*|[0-9]+)$' }).Count -eq 0) { continue }
+            $problems.Add("${rel}:${n} token-like string (base64url, 32+ chars)")
         }
 
         if (-not $inFence) {
@@ -54,7 +63,7 @@ foreach ($f in $files) {
             }
 
             # status tables: the column named Outcome / Result / Verification holds only the vocabulary
-            if ($line -match '^\s*\|') {
+            if ($checkVocab -and $line -match '^\s*\|') {
                 $cells = @(($line.Trim().Trim('|')) -split '\|' | ForEach-Object { $_.Trim() })
                 $prevIsTable = ($i -gt 0 -and $lines[$i - 1] -match '^\s*\|')
                 if (-not $prevIsTable) {
@@ -68,7 +77,7 @@ foreach ($f in $files) {
                 }
             } else { $statusCol = -1 }
 
-            if ($line -match '^\s*(Outcome|Result)\s*:\s*`?([^`\s][^`]*?)`?\s*$') {
+            if ($checkVocab -and $line -match '^\s*(Outcome|Result)\s*:\s*`?([^`\s][^`]*?)`?\s*$') {
                 $v = $Matches[2].Trim().TrimEnd('.')
                 if ($vocab -notcontains $v) { $problems.Add("${rel}:${n} status '$v' outside verified | failed | not run | manual") }
             }

@@ -25,8 +25,9 @@
 # Limits that cannot be solved statically:
 #   - an "imposter commit" SHA (a SHA that exists only in a fork) passes the pin check;
 #   - the real barrier against fork PRs is the GitHub repository setting (approval required
-#     for all external contributors + self-hosted runner restricted to selected workflows),
-#     configured in plan C Task 2. This script is the second line of defence.
+#     for all external contributors), configured in plan C Task 2. Runner groups and "selected
+#     workflows" do not exist for a User-owned repository, so they cannot be used. This script is
+#     the second line of defence.
 #
 # Usage: pwsh ci/check-workflows.ps1 [-Path .github/workflows]   (exit 1 on violations)
 param([string]$Path = '.github/workflows')

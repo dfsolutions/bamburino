@@ -53,6 +53,39 @@ try {
         }
     }
 
+    # legitimate content that must not be flagged
+    $sha40 = 'a' * 20 + '1' * 20
+    $ok = [ordered]@{
+        'git SHA (40 hex)'          = @("# T`nCommit $sha40 audited.`n", "# Other`n")
+        'sha256 on a sha256 line'   = @("# T`nsha256: $('ab12' * 16)`n", "# Other`n")
+        'patch name'                = @("# T`nApplies 0200-windows-msvc-string-literal-limit and 0210-windows-utf8-mesh-export-path, links libboost_locale-vc143-mt-x64-1_84.`n", "# Other`n")
+        'free-text Outcome (log)'   = @("# T`n", "# Other`n")
+    }
+    foreach ($name in $ok.Keys) {
+        $d = New-Fixture $ok[$name][0] $ok[$name][1]
+        $tmp += $d
+        Assert-True ((Invoke-Check $d).Code -eq 0) "$name -> exit 0"
+    }
+    $d = New-Fixture "# T`n" "# Other`n"
+    $tmp += $d
+    [IO.File]::WriteAllText((Join-Path $d 'docs/driver-build-log.md'), "| Step | Outcome |`n|---|---|`n| a | built, 12 warnings |`n")
+    Assert-True ((Invoke-Check $d).Code -eq 0) 'status vocabulary is not applied to docs/driver-build-log.md'
+    $d = New-Fixture "# T`n" "# Other`n"
+    $tmp += $d
+    [IO.File]::WriteAllText((Join-Path $d 'docs/acceptance-mvp.md'), "| Step | Outcome |`n|---|---|`n| a | built |`n")
+    $r = Invoke-Check $d
+    Assert-True ($r.Code -eq 1 -and $r.Out -match 'outside verified') 'status vocabulary is applied to docs/acceptance-*.md'
+    $d = New-Fixture "# T`n" "# Other`n"
+    $tmp += $d
+    [IO.File]::WriteAllText((Join-Path $d 'docs/other.md'), "# Other`nsha256 line ok but $('ab12' * 16) here`n")
+    Assert-True ((Invoke-Check $d).Code -eq 0) 'sha256 mention allows the 64-hex value'
+    $d = New-Fixture "# T`nthe archive, sha256`n$('ab12' * 16)`n"
+    $tmp += $d
+    Assert-True ((Invoke-Check $d).Code -eq 0) 'sha256 on the previous line allows the 64-hex value'
+    $d = New-Fixture "# T`n$('ab12' * 16)`n"
+    $tmp += $d
+    Assert-True ((Invoke-Check $d).Code -eq 1) '64 hex without sha256 mention still fails'
+
     # docs/superpowers is not scanned
     $d = New-Fixture "# T`n"
     $tmp += $d

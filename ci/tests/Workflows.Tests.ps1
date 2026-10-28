@@ -73,6 +73,9 @@ $studioJob = $std.Substring($std.IndexOf('  studio:'))
 Assert-True ($studioJob -match 'actions/checkout@[0-9a-f]{40} # v\S+\s+with:\s+persist-credentials: false') 'self-hosted checkout sets persist-credentials: false'
 Assert-True ($svc -match '(?m)^\s+run: \|[\s\S]*?pwsh ci/check-repo\.ps1' -and $svc.Contains('pwsh ci/check-docs.ps1') -and $svc.Contains('pwsh ci/check-workflows.ps1 -Path .github/workflows')) 'build-service runs check-repo, check-docs and check-workflows'
 Assert-True ($svc -notmatch 'python\s+-I\s+-m\s+unittest') 'build-service: no `python -I -m unittest` (-I drops the cwd from sys.path; run the test file directly)'
+Assert-True ($svc -match 'rustup component add rustfmt clippy') 'build-service: rustfmt and clippy components are installed'
+Assert-True ($svc -match 'Script tests' -and $svc -match 'ci/tests/CheckDocs\.Tests\.ps1' -and $svc -match 'ci/runner/tests/run\.ps1' -and $svc -match 'tools/tests/run\.ps1' -and $svc -match 'ci/tests/Package\.Tests\.ps1') 'build-service: script tests step'
+Assert-True ($svc -match 'Script tests' -and $svc -match 'ci/tests/Package\.Tests\.ps1') 'build-service: script tests step runs Package.Tests'
 Assert-True ($svc.IndexOf('pwsh ci/check-repo.ps1') -lt $svc.IndexOf('rustup toolchain install')) 'build-service: repository checks come before the cargo steps'
 Assert-True ($svc -match 'rustup toolchain install' -and $svc -notmatch 'rustup show') 'build-service installs the pinned toolchain (rustup toolchain install)'
 Assert-True ($std -notmatch 'D:\bb\artifacts' -and $std -match 'env\.BAMBURINO_BUILD_ROOT') 'build-studio upload path uses BAMBURINO_BUILD_ROOT'
@@ -87,6 +90,7 @@ if ($a) {
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("rel-" + [guid]::NewGuid() + ".sh")
     $stub = @'
 gh() { case "$*" in
+  *"api repos"*) echo "${FAKE_PATH:-.github/workflows/build-service.yml@refs/heads/main}";;
   *"--json event"*) echo "$FAKE_EVENT";;
   *"--json conclusion"*) echo success;;
   *"--json headSha"*) echo abc;;
@@ -105,6 +109,9 @@ ref_sha=abc
             $env:FAKE_EVENT = $ev; & bash $tmp 2>&1 | Out-Null
             Assert-True ($LASTEXITCODE -eq 0) "check_run accepts a '$ev' run"
         }
+        $env:FAKE_EVENT = 'push'; $env:FAKE_PATH = '.github/workflows/evil.yml@refs/heads/main'; & bash $tmp 2>&1 | Out-Null
+        Assert-True ($LASTEXITCODE -ne 0) 'check_run rejects a run of another workflow file'
+        Remove-Item Env:FAKE_PATH
         Remove-Item Env:FAKE_EVENT
     } else { Write-Host '  skip bash not found: shell snippet test' }
     Remove-Item $tmp -Force -ErrorAction SilentlyContinue

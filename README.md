@@ -264,7 +264,7 @@ Not generated yet — see docs/verification.md after the first verification run 
 - **ACLs.** `%ProgramData%\Bamburino\` has a protected DACL: SYSTEM and Administrators full control, the service account read (modify on `logs\`), the installing user read or modify.
 - **Path allowlist.** `allowed_dirs` defaults to Documents and Downloads of the installing user; the path rules reject traversal, UNC, device names, alternate data streams, symlinks and reparse points.
 - **No shell, no physical actions.** No command is exposed, and no physical action exists in this version.
-- The service runs as `NT AUTHORITY\LocalService`. The CI self-hosted runner is on demand and takes maintainer pushes only, never pull requests ([docs/ci-runner.md](docs/ci-runner.md)).
+- The service runs as `NT AUTHORITY\LocalService`. The CI self-hosted runner is on demand and takes maintainer pushes only: workflows never trigger on pull requests; a fork PR run must be approved by a maintainer — never approve a run that touches `.github/` ([docs/ci-runner.md](docs/ci-runner.md)).
 
 ## License and attributions
 
