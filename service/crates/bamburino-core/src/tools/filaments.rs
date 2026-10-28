@@ -6,7 +6,8 @@
 use serde_json::{Value, json};
 
 use super::args::{AssignFilamentArgs, ListFilamentsArgs};
-use super::mutate::{read_error, write_error};
+use super::mutate::read_error;
+use super::plates::locked_plate_error;
 use super::{Tools, driver_error};
 use crate::driver::{DriverError, SettingsTarget};
 use crate::errors::{ToolError, ToolErrorCode};
@@ -55,23 +56,6 @@ fn split_list(raw: &str) -> Vec<String> {
     raw.split(';')
         .map(|s| s.trim().trim_matches('"').trim().to_string())
         .collect()
-}
-
-/// Stable part of the driver's refusal for an object on a locked plate
-/// (`McpTools.cpp`, `filament_assign`: "Unlock every plate containing the
-/// object first"); matched by substring so a wording tweak around it is fine.
-const LOCKED_PLATE_MARKER: &str = "Unlock every plate";
-
-fn assign_error(e: DriverError) -> ToolError {
-    if let DriverError::InvalidParams { message } = &e
-        && message.contains(LOCKED_PLATE_MARKER)
-    {
-        return ToolError::new(
-            ToolErrorCode::PlateLocked,
-            format!("{message}. Unlock the plate in Bambu Studio and retry; nothing was changed."),
-        );
-    }
-    write_error(e)
 }
 
 /// Extruder (1-based slot) of an object as the driver reports it.
@@ -138,7 +122,7 @@ impl Tools {
                     let done = drv
                         .filament_assign(&a.object_id, a.filament_slot - 1)
                         .await
-                        .map_err(assign_error)?;
+                        .map_err(locked_plate_error)?;
                     Ok((previous, done.preset))
                 },
                 || async {

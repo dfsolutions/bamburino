@@ -19,7 +19,8 @@ use crate::errors::{ToolError, ToolErrorCode};
 use crate::revision::RevisionState;
 
 pub use args::{
-    AssignFilamentArgs, Change, GetSettingsArgs, JobArgs, ListFilamentsArgs, SearchArgs,
+    AssignFilamentArgs, Change, GetSettingsArgs, JobArgs, ListFilamentsArgs, MoveToPlateArgs,
+    PlateCreateArgs, PlateDeleteArgs, PlateDeleteContents, PlateRenameArgs, SearchArgs,
     SetSettingsArgs, SliceArgs, SummaryArgs, SupportKind, SupportSettings, SupportStyle,
     SupportTarget, SupportsArgs, TargetRef, Transform, TransformArgs, TransformMode,
 };

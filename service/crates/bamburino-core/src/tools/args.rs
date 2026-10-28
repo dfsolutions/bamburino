@@ -184,3 +184,59 @@ pub struct AssignFilamentArgs {
     /// Revision from `studio_get_state`; the call is refused when stale.
     pub expected_revision: u64,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlateCreateArgs {
+    /// Name for the new plate. Default: the driver's "Plate N".
+    pub name: Option<String>,
+    /// Revision from `studio_get_state`; the call is refused when stale.
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlateRenameArgs {
+    /// Plate to rename, 0-based (`studio_get_state` `plates[].plate_index`).
+    pub plate_index: u32,
+    /// New name; must not be empty.
+    pub name: String,
+    /// Revision from `studio_get_state`; the call is refused when stale.
+    pub expected_revision: u64,
+}
+
+/// What `studio_plate_delete` does with the instances on the plate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlateDeleteContents {
+    /// Move the instances to `target_plate_index` (must be empty and unlocked).
+    Move,
+    /// Delete the instances; objects left without instances go too.
+    Delete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlateDeleteArgs {
+    /// Plate to delete, 0-based. Later plates are renumbered.
+    pub plate_index: u32,
+    /// Required when the plate is not empty.
+    pub contents: Option<PlateDeleteContents>,
+    /// Destination plate for `contents: "move"`; refused with any other value.
+    pub target_plate_index: Option<u32>,
+    /// Revision from `studio_get_state`; the call is refused when stale.
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MoveToPlateArgs {
+    /// Object the instance belongs to (`studio_list_models`).
+    pub object_id: String,
+    /// Instance to move. Optional only when the object has a single instance.
+    pub instance_id: Option<String>,
+    /// Destination plate, 0-based.
+    pub plate_index: u32,
+    /// Revision from `studio_get_state`; the call is refused when stale.
+    pub expected_revision: u64,
+}
