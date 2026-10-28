@@ -390,10 +390,10 @@ fn a_protected_dir_without_the_owner_is_reacled() {
         ],
     );
     let me = sid();
+    let before = security_sddl(&dir).unwrap();
     assert!(
-        !security_sddl(&dir)
-            .unwrap()
-            .contains(&format!(";;;{})", canonical_trustee(&me)))
+        !before.contains(&format!(";;;{})", canonical_trustee(&me))),
+        "{before}"
     );
     let (sub, guard) = build_subscriber(&dir, 7, false, &me, Vec::new());
     tracing::subscriber::with_default(sub, || tracing::info!("x"));
