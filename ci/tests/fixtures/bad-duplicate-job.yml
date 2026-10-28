@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Test fixture for ci/check-workflows.ps1 - duplicate job id hides a self-hosted job (rule g)
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567
+        with: { sparse-checkout: ci/maintainers.txt }
+      - run: grep -qxF "${{ github.actor }}" ci/maintainers.txt || { echo "::error::actor not allowed on self-hosted runner"; exit 1; }
+  build:
+    runs-on: [self-hosted, windows]
+    if: always()
+    steps:
+      - run: echo
+  build:
+    needs: guard
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo

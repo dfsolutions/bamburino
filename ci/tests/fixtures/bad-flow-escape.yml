@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Test fixture for ci/check-workflows.ps1 - escaped quote then # in flow mapping hides an unpinned uses (rule g)
+on: workflow_dispatch
+permissions:
+  contents: read
+permissions:
+  contents: read
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    steps:
+      - { run: "a \" #", uses: evil/x@v1 }

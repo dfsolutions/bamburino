@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Test fixture for ci/check-workflows.ps1 - default labels runner (rule a)
+on: pull_request
+jobs:
+  build:
+    runs-on: [Windows, X64]
+    steps:
+      - run: echo

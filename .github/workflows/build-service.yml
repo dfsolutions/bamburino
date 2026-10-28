@@ -1,0 +1,90 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Hosted build of the Bamburino service (Rust, Windows). No release, no write permission:
+# releases are created by release.yml from the artifact of this workflow.
+name: build-service
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: build-service-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Repository checks
+        shell: pwsh
+        run: |
+          pwsh ci/check-repo.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh ci/check-docs.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh ci/check-workflows.ps1 -Path .github/workflows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Script tests
+        shell: pwsh
+        run: |
+          foreach ($t in 'ci/tests/CheckWorkflows.Tests.ps1', 'ci/tests/Workflows.Tests.ps1', 'ci/tests/Package.Tests.ps1', 'ci/tests/CheckDocs.Tests.ps1', 'ci/runner/tests/run.ps1', 'tools/tests/run.ps1') {
+            pwsh $t
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Toolchain (installs the version pinned in service/rust-toolchain.toml)
+        working-directory: service
+        run: |
+          rustup toolchain install
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup component add rustfmt clippy
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            service/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('service/Cargo.lock', 'service/rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Catalog sources and tests
+        run: |
+          python -I catalog/fetch_sources.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -I catalog/test_build_catalog.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Format
+        working-directory: service
+        run: cargo fmt --all --check
+      - name: Clippy
+        working-directory: service
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy (mock driver)
+        working-directory: service
+        run: cargo clippy --workspace --all-targets --features bamburino-core/mock -- -D warnings
+      - name: Test
+        working-directory: service
+        run: cargo test --workspace --features bamburino-core/mock
+      - name: Build release
+        working-directory: service
+        run: cargo build --release --workspace
+      - name: Package
+        run: pwsh ci/package-service.ps1 -Exe service/target/release/bamburino.exe -Out dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bamburino-win64
+          path: |
+            dist/bamburino-*-win64.zip
+            dist/bamburino-*-win64.zip.sha256
+          if-no-files-found: error
+          retention-days: 30

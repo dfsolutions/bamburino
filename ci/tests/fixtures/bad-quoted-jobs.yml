@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Test fixture for ci/check-workflows.ps1 - quoted jobs key (rule a)
+on: pull_request
+"jobs":
+  build:
+    runs-on: self-hosted
+    steps:
+      - run: echo

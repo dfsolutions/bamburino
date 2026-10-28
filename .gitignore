@@ -8,3 +8,4 @@
 /BambuStudio_MCP_Codex_Brief_v2.md
 /catalog/upstream-src/
 __pycache__/
+/service/.cargo/config.toml

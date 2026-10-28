@@ -5,7 +5,12 @@ $problems = New-Object System.Collections.Generic.List[string]
 $required = @('.gitignore', '.gitattributes', 'LICENSE', 'NOTICE.md', 'README.md',
     'driver/upstream.toml', 'tools/Upstream.psm1', 'tools/GitHub.psm1', 'tools/Package.psm1',
     'tools/tests/run.ps1', 'tools/tests/Upstream.Tests.ps1', 'ci/check-repo.ps1',
-    'service/.gitkeep', 'catalog/.gitkeep', 'docs/.gitkeep')
+    'ci/runner/Runner.psm1', 'ci/runner/register.ps1', 'ci/runner/secure-repo.ps1',
+    'ci/runner/start.ps1', 'ci/runner/stop.ps1', 'ci/runner/tests/run.ps1',
+    'ci/runner/tests/Runner.Tests.ps1', 'docs/ci-runner.md',
+    'ci/package-service.ps1', 'ci/service-install.ps1', 'ci/install-studio.ps1', 'ci/tests/Package.Tests.ps1',
+    'ci/tests/Workflows.Tests.ps1', 'ci/check-docs.ps1', 'ci/tests/CheckDocs.Tests.ps1', 'docs/architecture.md', 'docs/limitations.md', 'docs/tools.md', '.github/workflows/build-service.yml', '.github/workflows/build-studio.yml',
+    '.github/workflows/release.yml', 'service/.gitkeep', 'catalog/.gitkeep', 'docs/.gitkeep')
 foreach ($f in $required) {
     if (-not (Test-Path -LiteralPath $f)) { $problems.Add("missing file: $f") }
 }
