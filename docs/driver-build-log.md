@@ -13,7 +13,7 @@ Detected by `pwsh driver/prereqs.ps1 -Check` on the build machine (exit 0):
 | Strawberry Perl | 5.42.3.1 at `C:\Strawberry\perl\bin\perl.exe` |
 | pkg-config | pkg-config-lite 0.28 at `%LOCALAPPDATA%\Microsoft\WinGet\Links\pkg-config.exe` |
 | git | `core.longpaths=true` (global) |
-| Free space | 32.9 GB on `D:\` for build root `D:\bb` (minimum 25 GB) |
+| Free space | 32.9 GB on `D:\` for build root `D:\BambuBuild` (minimum 25 GB) |
 
 Installed by `pwsh driver/prereqs.ps1 -Install`: Strawberry Perl 5.42.3.1 (winget `StrawberryPerl.StrawberryPerl`),
 pkg-config-lite 0.28-1 (winget `bloodrock.pkg-config-lite`), `git config --global core.longpaths true`.
@@ -27,18 +27,18 @@ not modified.
 
 ## 2026-10-27 - Dependencies (Task 6)
 
-`pwsh driver/build.ps1 -Step deps` on the patched clone (`D:\bb\BambuStudio`, `v02.08.04.57`), deps tree
+`pwsh driver/build.ps1 -Step deps` on the patched clone (`D:\BambuBuild\BambuStudio`, `v02.08.04.57`), deps tree
 `8e648ef0f91f8d5ef2b0844e1e252be91ce81ac9` (`git rev-parse <tag_commit>:deps`).
 
 | Round | Start | End | Duration | Outcome | First error | Fix |
 |---|---|---|---|---|---|---|
 | 1 | 23:11:06 | 23:33:58 | 22.9 min (cmake configure + msbuild 22.8 min) | OK, exit 0 | none (0 `error XXnnnn:` lines in the log) | none |
 
-Log: `D:\bb\logs\deps-20261027-231109.log` (~51k lines). Rounds used: 1 of 3.
+Log: `D:\BambuBuild\logs\deps-20261027-231109.log` (~51k lines). Rounds used: 1 of 3.
 
-Result: `D:\bb\deps-out\usr\local` with Boost 1.84, OpenSSL, wxWidgets 3.1 (`lib\vc_x64_lib\wxmsw31u_core.lib`),
+Result: `D:\BambuBuild\deps-out\usr\local` with Boost 1.84, OpenSSL, wxWidgets 3.1 (`lib\vc_x64_lib\wxmsw31u_core.lib`),
 CGAL, OpenVDB, OCCT, TBB, FFmpeg, OpenCV, assimp, curl, GMP/MPFR and the rest of `deps/CMakeLists.txt`.
-Sentinel `D:\bb\deps-out\.bamburino-deps-key` = the deps tree SHA-1 above; a second `-Step deps` is a no-op in 0.5 s.
+Sentinel `D:\BambuBuild\deps-out\.bamburino-deps-key` = the deps tree SHA-1 above; a second `-Step deps` is a no-op in 0.5 s.
 
 Notes:
 - Boost's own CMake install uses the versioned layout on Windows: headers are in
@@ -60,7 +60,7 @@ Notes:
 
 ## 2026-10-28 - App build, MCP standalone tests, package (Task 8)
 
-`pwsh driver/build.ps1 -Step app` on the patched clone (`D:\bb\BambuStudio`, `v02.08.04.57`), VS 2022 Build Tools
+`pwsh driver/build.ps1 -Step app` on the patched clone (`D:\BambuBuild\BambuStudio`, `v02.08.04.57`), VS 2022 Build Tools
 17.13 / MSVC 14.43, CMake 3.30.5 (VS), deps from Task 6 (no-op). Rounds count from the first `-Step app`.
 
 | Round | Start | End | Duration | Outcome | First error | Fix |
@@ -74,18 +74,18 @@ own with exit 1 at 15.8 min, so it is a genuine failed round. During round 2's c
 run executed `-Step patch` on the clone (00:13:48): file contents were restored identically, only timestamps changed;
 the three errors are deterministic code errors unrelated to it.
 
-Result of round 3: `D:\bb\install-dir\bambu-studio.exe`, fixed product version 2.8.4.57, `FileVersion` `02.08.04.57`;
+Result of round 3: `D:\BambuBuild\install-dir\bambu-studio.exe`, fixed product version 2.8.4.57, `FileVersion` `02.08.04.57`;
 the `ProductVersion` string is empty because upstream's `BambuStudio.rc.in` uses `@SLIC3R_BUILD_ID@`, which no
 public upstream CMake file defines. `BambuStudio.dll` embeds `bamburino.8bd194447b99` (patch_id after 0200/0210).
 
-`-Step test` (08:35:23, log `D:\bb\logs\test-20261028-083523.log`): configure OK, build failed (exit 45):
+`-Step test` (08:35:23, log `D:\BambuBuild\logs\test-20261028-083523.log`): configure OK, build failed (exit 45):
 `boost-1_84\boost\asio\detail\socket_types.hpp(24,1): error C1189: WinSock.h has already been included`, compiling
 `tests/mcp/test_mcp_server.cpp`, which includes `slic3r/GUI/McpGcodeExport.hpp` (`#include <windows.h>` at line 9,
 without `WIN32_LEAN_AND_MEAN`) before `<boost/asio.hpp>`. Not fixed: the round budget is spent (see Task 8 report).
 
-`-Step package`: `D:\bb\artifacts\BambuStudio-bamburino-02.08.04.57-8bd194447b99-win64.zip` (259.5 MB) and `.sha256`.
+`-Step package`: `D:\BambuBuild\artifacts\BambuStudio-bamburino-02.08.04.57-8bd194447b99-win64.zip` (259.5 MB) and `.sha256`.
 
-Disk: D: had 17.3 GB free before round 1. `D:\bb\BambuStudio\deps\build` (4.8 GB) was deleted before round 3
+Disk: D: had 17.3 GB free before round 1. `D:\BambuBuild\BambuStudio\deps\build` (4.8 GB) was deleted before round 3
 (deps stay a no-op: the sentinel lives in `deps-out`). The app `build` folder is 8.5 GB (obj 2.3, lib 2.3, pdb 2.2,
 pch 1.3), install-dir 0.55 GB. Free space after round 3 and packaging: 2.2 GB, also because another build on D:
 (`D:\GoogleAI\bamburino-service\service`, about 9.3 GB written in the same hour) consumed space. The reproducibility
@@ -94,8 +94,8 @@ run (Step 5) was not run: it needs at least 12 GB free.
 ### Test-program round (extra, controller ruling; not an app round)
 
 Scope: `tests/mcp` only (the PR's standalone `mcp_server_tests` and `test_legacy_contract.py`). Reason: the
-`-Step test` compile error above (C1189). Before it, `D:\bb\BambuStudio\build` (8.5 GB) was deleted: D: free went from
-1.3 GB to 10.1 GB. The app stays installed in `D:\bb\install-dir`, which `-Step patch` does not touch because it is
+`-Step test` compile error above (C1189). Before it, `D:\BambuBuild\BambuStudio\build` (8.5 GB) was deleted: D: free went from
+1.3 GB to 10.1 GB. The app stays installed in `D:\BambuBuild\install-dir`, which `-Step patch` does not touch because it is
 outside the clone. The app was not rebuilt.
 
 One round, several `-Step patch` + `-Step test` passes (by ruling, the link-setup fixes of the test program belong to
@@ -109,7 +109,7 @@ the same round):
 | d | 08:46:19 | ctest passed; `test_legacy_contract.py` failed | `setUpClass` `assert sha256(oracle) == ORACLE_SHA256`: the clone work tree is CRLF (`core.autocrlf=true`), and the test pins the hash of the committed LF bytes | `build.ps1` runs the Python test on an LF export of the clone's index (`git -c core.autocrlf=false checkout-index --prefix=<tmp>/`), no clone change |
 | e | 08:47:00 | **OK** (exit 0) | none | none |
 
-Final pass log: `D:\bb\logs\test-20261028-084700.log`. Results:
+Final pass log: `D:\BambuBuild\logs\test-20261028-084700.log`. Results:
 - ctest `100% tests passed, 0 tests failed out of 1` (`mcp_server`, 2.22 s);
 - `test_legacy_contract.py`: 3 tests, OK.
 
@@ -121,7 +121,7 @@ Final patch_id: `2703638ef313`. The installed app and the zip from round 3 carry
 
 ### Reproducibility and final app build (Step 5)
 
-Disk: about 30 GB free on D: once the other plan's cargo target was moved to C:. `D:\bb\BambuStudio\build` was
+Disk: about 30 GB free on D: once the other plan's cargo target was moved to C:. `D:\BambuBuild\BambuStudio\build` was
 absent (deleted earlier), so this started from a clean `build` folder.
 
 | Attempt | Start | End | Duration | Outcome | First error |
@@ -137,9 +137,9 @@ Attempt 2 ran `prereqs (12 GB) -> fetch skipped (clone exists) -> patch (6 patch
 -> test -> package`. Results:
 - `bambu-studio.exe` version 2.8.4.57, `FileVersion` `02.08.04.57`; the final patch_id `2703638ef313`
   (0001+0100+0120+0200+0210+0220) is embedded as `bamburino.2703638ef313`;
-- `D:\bb\logs\test-20261028-091459.log`: ctest `100% tests passed, 0 tests failed out of 1`, legacy contract 3
+- `D:\BambuBuild\logs\test-20261028-091459.log`: ctest `100% tests passed, 0 tests failed out of 1`, legacy contract 3
   tests OK;
-- `D:\bb\artifacts\BambuStudio-bamburino-02.08.04.57-2703638ef313-win64.zip` (260.6 MB), sha256
+- `D:\BambuBuild\artifacts\BambuStudio-bamburino-02.08.04.57-2703638ef313-win64.zip` (260.6 MB), sha256
   `1b101b80c5acc7f7fd0379ca07d9a04e1993bfea7dce785a16b174cd28414438`.
 
 The superseded `8bd194447b99` zip was removed. `pwsh tools/tests/run.ps1`: all 9 PASS. Free on D: afterwards:
@@ -154,14 +154,14 @@ Outcome: PR12485-OK (3 rounds + 1 test-program round)
 - `-Step package` now refuses (exit 50) an `install-dir\BambuStudio.dll` without `bamburino.<patch_id>` for the
   `patch_id` in `upstream.toml`, and adds `SOURCE.txt` (AGPL-3.0 section 6), `LICENSE` and `NOTICE.md` at the zip
   root (`install-studio.ps1` too once `ci/install-studio.ps1` is on the branch). Covered by
-  `tools/tests/Package.Tests.ps1` on a fake build root. The zip in `D:\bb\artifacts` predates this change and does
+  `tools/tests/Package.Tests.ps1` on a fake build root. The zip in `D:\BambuBuild\artifacts` predates this change and does
   not contain those files; the next real `-Step package` produces them.
 - `/nodeReuse:false` is passed to msbuild (after `--` for `cmake --build`, directly for the deps msbuild): it is an
   msbuild switch, not a cmake flag. Not exercised yet (no rebuild); idle `MSBuild.exe /nodemode:1 /nodeReuse:true`
   workers from the 08:52 build were still alive at the time of this change.
 - `pwsh tools/tests/run.ps1` runs the unit tests (`Upstream`, `Patch`, `Audit`, `Package`) always, and the
   integration tests (`Apply`, `Identity`, `Snapshot`, `App`, `Deps`, `Prereqs`; they re-apply the patch set on
-  `D:\bb\BambuStudio` with `-Step patch` or read `D:\bb`) only with `-Integration` or when the clone exists. They
+  `D:\BambuBuild\BambuStudio` with `-Step patch` or read `D:\BambuBuild`) only with `-Integration` or when the clone exists. They
   are refused while a build runs (`cmake.exe`, or an `MSBuild.exe` that is not an idle `/nodemode:` worker): exit 1
   with `-Integration`, SKIP otherwise.
 - `BAMBURINO_MSBUILD_JOBS` (default 8, 1..64) caps `-m:<n>` and `/p:CL_MPCount=<n>` on every msbuild call (`Get-MsBuildJobArgs`): unbounded `-m` on 20 threads started up to 20 `cl.exe` of 1-2 GB each, and with the PC in use (Teams call, VS Code, browser) memory pressure killed the build; the self-hosted CI job died twice on 2026-10-28 at about 13 min with no compile error.

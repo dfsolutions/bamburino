@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-# One Studio build at a time (shared build root D:\bb). Queued runs wait, they are never cancelled midway.
+# One Studio build at a time (shared build root D:\BambuBuild). Queued runs wait, they are never cancelled midway.
 concurrency:
   group: build-studio
   cancel-in-progress: false
@@ -31,7 +31,7 @@ jobs:
     runs-on: [self-hosted, bamburino-win]
     timeout-minutes: 720
     env:
-      BAMBURINO_BUILD_ROOT: D:\bb
+      BAMBURINO_BUILD_ROOT: D:\BambuBuild
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

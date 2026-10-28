@@ -46,7 +46,7 @@ Assert-True ($std -notmatch '(?m)^\s+pull_request') 'build-studio: no pull_reque
 Assert-True ($std -match 'runs-on: \[self-hosted, bamburino-win\]' -and $std -match 'needs: \[guard\]') 'build-studio: runs on [self-hosted, bamburino-win], needs guard'
 Assert-True ($std -match '(?m)^concurrency:' -and $std -match 'cancel-in-progress: false') 'build-studio: concurrency without cancel'
 Assert-True ($std -match 'timeout-minutes: 720') 'build-studio: timeout-minutes 720'
-Assert-True ($std -match 'BAMBURINO_BUILD_ROOT: D:\\bb' -and $std -match 'pwsh driver/build\.ps1 -Step all') 'build-studio: build root D:\bb, build.ps1 -Step all'
+Assert-True ($std -match 'BAMBURINO_BUILD_ROOT: D:\\BambuBuild' -and $std -match 'pwsh driver/build\.ps1 -Step all') 'build-studio: build root D:\BambuBuild, build.ps1 -Step all'
 foreach ($m in '10 prerequisites missing', '20 patch does not apply', '21 patch_id differs from driver/upstream.toml', '30 dependency build failed', '40 app build failed', '45 MCP standalone tests failed', '50 packaging failed') {
     Assert-True ($std.Contains($m)) "build-studio maps exit code: $m"
 }
@@ -78,7 +78,7 @@ Assert-True ($svc -match 'Script tests' -and $svc -match 'ci/tests/CheckDocs\.Te
 Assert-True ($svc -match 'Script tests' -and $svc -match 'ci/tests/Package\.Tests\.ps1') 'build-service: script tests step runs Package.Tests'
 Assert-True ($svc.IndexOf('pwsh ci/check-repo.ps1') -lt $svc.IndexOf('rustup toolchain install')) 'build-service: repository checks come before the cargo steps'
 Assert-True ($svc -match 'rustup toolchain install' -and $svc -notmatch 'rustup show') 'build-service installs the pinned toolchain (rustup toolchain install)'
-Assert-True ($std -notmatch 'D:\bb\artifacts' -and $std -match 'env\.BAMBURINO_BUILD_ROOT') 'build-studio upload path uses BAMBURINO_BUILD_ROOT'
+Assert-True ($std -notmatch 'D:\\BambuBuild\\artifacts' -and $std -match 'env\.BAMBURINO_BUILD_ROOT') 'build-studio upload path uses BAMBURINO_BUILD_ROOT'
 
 # ---- release.yml: event check (YAML + the real shell function against a fake gh) ----
 Assert-True ($rel -match '--json event' -and $rel -match 'push\|workflow_dispatch\) ;;') 'release: check_run requires event push or workflow_dispatch'

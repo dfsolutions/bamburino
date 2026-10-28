@@ -3,7 +3,7 @@
 # Runner.Listener / Runner.Worker after a timeout, then waits until GitHub reports it offline.
 # Exit 0 only when the processes are gone AND the runner is offline (or absent) on GitHub.
 [CmdletBinding()]
-param([string]$RunnerDir = 'D:\bb\runner', [string]$Name = 'federico-pc')
+param([string]$RunnerDir = 'D:\BambuBuild\runner', [string]$Name = 'federico-pc')
 $ErrorActionPreference = 'Stop'
 $root = Resolve-Path "$PSScriptRoot/../.."
 Import-Module "$root/tools/GitHub.psm1" -Force

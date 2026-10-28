@@ -18,8 +18,10 @@ so they run on the maintainer's PC instead of GitHub-hosted runners.
 | Name | `federico-pc` |
 | Labels | `self-hosted`, `Windows`, `X64`, `bamburino-win` |
 | Runner version | 2.338.0 (self-updates when it connects) |
-| Install dir | `D:\bb\runner` (outside every repository) |
-| Work dir | `D:\bb\runner\_work` |
+| Install dir | `D:\BambuBuild\runner` (outside every repository) |
+| Work dir | `D:\BambuBuild\runner\_work` |
+
+The work dir is also stored as an absolute path in `D:\BambuBuild\runner\.runner` (`workFolder`, backslashes doubled in the JSON). If the build folder is ever moved or renamed, repeat the step: stop the runner, move the folder, edit `workFolder` in `.runner` to the new path (keep the JSON valid; the file is hidden, clear the attribute before saving), then start it. The folder was renamed from `D:\bb` on 2026-10-28.
 
 ## Register, start, stop, remove
 
@@ -34,7 +36,7 @@ pwsh ci/runner/start.ps1        # open the runner in its own window; "Listening 
 pwsh ci/runner/stop.ps1
 ```
 
-`start.ps1` records the launched process id in `D:\bb\runner\.bamburino-runner.pid`. `stop.ps1`
+`start.ps1` records the launched process id in `D:\BambuBuild\runner\.bamburino-runner.pid`. `stop.ps1`
 asks that process tree to exit, waits up to 20 s, then force-stops any remaining `Runner.Listener` /
 `Runner.Worker`, waits until none is left, and finally polls
 `gh api repos/dfsolutions/bamburino/actions/runners` (up to about 90 s) until `federico-pc` is
@@ -61,7 +63,7 @@ To remove it for good:
 
 ```powershell
 $t = gh api -X POST repos/dfsolutions/bamburino/actions/runners/remove-token --jq .token
-D:\bb\runner\config.cmd remove --token $t
+D:\BambuBuild\runner\config.cmd remove --token $t
 ```
 
 Notes on `register.ps1`:
@@ -69,7 +71,7 @@ Notes on `register.ps1`:
 - Do **not** run it under `Start-Transcript` (or any other logging of the console/command line): the
   one-time registration token is on the `config.cmd` command line. If `config.cmd` fails, the script
   reports only `config.cmd failed with exit <code>` and the output with the token masked.
-- If `D:\bb\runner\config.cmd` already exists, the download and SHA-256 check are skipped (only the
+- If `D:\BambuBuild\runner\config.cmd` already exists, the download and SHA-256 check are skipped (only the
   registration is redone, `--replace`). Delete the directory to force a fresh download.
 
 `register.ps1` takes the GitHub token from Git Credential Manager (`tools/GitHub.psm1`,
