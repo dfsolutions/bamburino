@@ -19,9 +19,9 @@ use crate::errors::{ToolError, ToolErrorCode};
 use crate::revision::RevisionState;
 
 pub use args::{
-    Change, GetSettingsArgs, JobArgs, ListFilamentsArgs, SearchArgs, SetSettingsArgs, SliceArgs,
-    SummaryArgs, SupportKind, SupportSettings, SupportStyle, SupportTarget, SupportsArgs,
-    TargetRef, Transform, TransformArgs, TransformMode,
+    AssignFilamentArgs, Change, GetSettingsArgs, JobArgs, ListFilamentsArgs, SearchArgs,
+    SetSettingsArgs, SliceArgs, SummaryArgs, SupportKind, SupportSettings, SupportStyle,
+    SupportTarget, SupportsArgs, TargetRef, Transform, TransformArgs, TransformMode,
 };
 pub use filaments::{normalize_ams_colour, parse_project_colours};
 pub use mutate::compose_rotation_deg;

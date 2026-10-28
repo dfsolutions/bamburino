@@ -5,10 +5,11 @@
 
 use serde_json::{Value, json};
 
-use super::args::ListFilamentsArgs;
+use super::args::{AssignFilamentArgs, ListFilamentsArgs};
+use super::mutate::{read_error, write_error};
 use super::{Tools, driver_error};
 use crate::driver::{DriverError, SettingsTarget};
-use crate::errors::ToolError;
+use crate::errors::{ToolError, ToolErrorCode};
 
 fn hex_rgb(s: &str) -> Option<String> {
     if s.len() == 6 && s.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -56,9 +57,104 @@ fn split_list(raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// Extruder (1-based slot) of an object as the driver reports it.
+async fn extruder_slot(
+    drv: &dyn crate::driver::DriverClient,
+    object_id: &str,
+) -> Result<u32, DriverError> {
+    let keys = vec!["extruder".to_string()];
+    let eff = drv
+        .settings_effective(
+            &SettingsTarget::Object {
+                object_id: object_id.to_string(),
+            },
+            Some(&keys),
+        )
+        .await?;
+    eff.iter()
+        .find(|s| s.key == "extruder")
+        .and_then(|s| s.value.trim().parse::<u32>().ok())
+        .ok_or_else(|| DriverError::Protocol {
+            message: "the driver did not report `extruder`".into(),
+        })
+}
+
 type AmsRead = (Option<String>, Value, Value, Option<String>);
 
 impl Tools {
+    /// Assigns a project filament slot (1-based) to an object.
+    pub async fn studio_assign_filament(&self, a: AssignFilamentArgs) -> Result<Value, ToolError> {
+        self.revision.touch_client();
+        let a = &a;
+        let ((previous, preset), applied, revision) = self
+            .guarded_mutation_with(
+                a.expected_revision,
+                false,
+                |drv| async move {
+                    let models = drv.model_list().await.map_err(read_error)?;
+                    if !models.iter().any(|m| m.id == a.object_id) {
+                        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+                        return Err(ToolError::new(
+                            ToolErrorCode::ObjectNotFound,
+                            format!("object {} does not exist", a.object_id),
+                        )
+                        .with_details(json!({ "object_ids": ids })));
+                    }
+                    let n = drv
+                        .active_presets()
+                        .await
+                        .map_err(read_error)?
+                        .filaments
+                        .len();
+                    if a.filament_slot == 0 || a.filament_slot as usize > n {
+                        return Err(ToolError::new(
+                            ToolErrorCode::InvalidArgument,
+                            format!(
+                                "filament_slot {} is outside 1..={n}; list the slots with studio_list_filaments",
+                                a.filament_slot
+                            ),
+                        )
+                        .with_details(json!({ "filament_slots": n })));
+                    }
+                    let previous = extruder_slot(drv.as_ref(), &a.object_id)
+                        .await
+                        .map_err(read_error)?;
+                    let done = drv
+                        .filament_assign(&a.object_id, a.filament_slot - 1)
+                        .await
+                        .map_err(write_error)?;
+                    Ok((previous, done.preset))
+                },
+                || async {
+                    extruder_slot(self.driver.as_ref(), &a.object_id)
+                        .await
+                        .map_err(|e| {
+                            let mut err = read_error(e);
+                            err.details["outcome"] = json!("applied_unverified");
+                            err
+                        })
+                },
+            )
+            .await?;
+        if applied != a.filament_slot {
+            return Err(ToolError::new(
+                ToolErrorCode::DriverError,
+                format!(
+                    "the driver accepted the assignment but reports slot {applied}, not {}",
+                    a.filament_slot
+                ),
+            )
+            .with_details(json!({ "outcome": "applied_unverified", "applied_slot": applied })));
+        }
+        Ok(json!({
+            "object_id": a.object_id,
+            "filament_slot": applied,
+            "previous_slot": previous,
+            "preset": preset,
+            "revision": revision,
+        }))
+    }
+
     pub async fn studio_list_filaments(&self, a: ListFilamentsArgs) -> Result<Value, ToolError> {
         let (_app, revision) = self.ready_with_revision().await?;
         let presets = self.driver.active_presets().await.map_err(driver_error)?;

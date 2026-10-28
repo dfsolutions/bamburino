@@ -7,8 +7,10 @@ use std::time::Duration;
 use bamburino_core::detect::FixedProcessProbe;
 use bamburino_core::driver::mock::{MockAms, MockDriver, MockFilament};
 use bamburino_core::driver::{AmsTray, AmsUnit, DeviceSummary};
+use bamburino_core::errors::ToolErrorCode;
 use bamburino_core::tools::{
-    ListFilamentsArgs, ToolConfig, Tools, normalize_ams_colour, parse_project_colours,
+    AssignFilamentArgs, ListFilamentsArgs, ToolConfig, Tools, normalize_ams_colour,
+    parse_project_colours,
 };
 use serde_json::json;
 
@@ -200,4 +202,115 @@ async fn list_filaments_is_a_read_and_needs_no_revision() {
         "transform_apply",
     ];
     assert!(!mock.calls().iter().any(|c| writes.contains(&c.as_str())));
+}
+
+async fn revision(t: &Tools) -> u64 {
+    t.studio_get_state().await.unwrap()["revision"]
+        .as_u64()
+        .unwrap()
+}
+
+fn assign(slot: u32, rev: u64) -> AssignFilamentArgs {
+    AssignFilamentArgs {
+        object_id: "obj-1".into(),
+        filament_slot: slot,
+        expected_revision: rev,
+    }
+}
+
+fn two_presets(mock: &Arc<MockDriver>) {
+    mock.set_filaments(vec![
+        fil("Bambu PLA Basic", "PLA", Some("#00AE42")),
+        fil("Bambu PETG Basic", "PETG", Some("#FF0000")),
+    ]);
+}
+
+fn no_assign_call(mock: &Arc<MockDriver>) {
+    assert!(!mock.calls().iter().any(|c| c == "filament_assign"));
+}
+
+#[tokio::test]
+async fn assign_sends_zero_based_index_and_reads_back_one_based() {
+    let mock = Arc::new(MockDriver::new());
+    two_presets(&mock);
+    let t = tools_with(&mock);
+    let rev = revision(&t).await;
+    let r = t.studio_assign_filament(assign(2, rev)).await.unwrap();
+    assert_eq!(r["object_id"], "obj-1");
+    assert_eq!(r["filament_slot"], 2);
+    assert_eq!(r["previous_slot"], 1);
+    assert_eq!(r["preset"], "Bambu PETG Basic");
+    assert_eq!(mock.assigned_filament_indices(), vec![1]);
+    assert_eq!(mock.extruder_of("obj-1"), 2);
+}
+
+#[tokio::test]
+async fn assign_bumps_the_revision_and_the_returned_revision_is_current() {
+    let mock = Arc::new(MockDriver::new());
+    two_presets(&mock);
+    let t = tools_with(&mock);
+    let rev = revision(&t).await;
+    let r = t.studio_assign_filament(assign(2, rev)).await.unwrap();
+    assert!(r["revision"].as_u64().unwrap() > rev);
+    assert_eq!(
+        t.studio_get_state().await.unwrap()["revision"],
+        r["revision"]
+    );
+}
+
+#[tokio::test]
+async fn assign_slot_zero_and_out_of_range_are_rejected_before_any_write() {
+    let mock = Arc::new(MockDriver::new());
+    two_presets(&mock);
+    let t = tools_with(&mock);
+    let rev = revision(&t).await;
+    for slot in [0, 3] {
+        let e = t
+            .studio_assign_filament(assign(slot, rev))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, ToolErrorCode::InvalidArgument);
+        assert_eq!(e.details["filament_slots"], 2);
+    }
+    no_assign_call(&mock);
+    assert!(mock.assigned_filament_indices().is_empty());
+}
+
+#[tokio::test]
+async fn assign_unknown_object_is_object_not_found() {
+    let mock = Arc::new(MockDriver::new());
+    two_presets(&mock);
+    let t = tools_with(&mock);
+    let rev = revision(&t).await;
+    let mut a = assign(1, rev);
+    a.object_id = "nope".into();
+    let e = t.studio_assign_filament(a).await.unwrap_err();
+    assert_eq!(e.code, ToolErrorCode::ObjectNotFound);
+    assert_eq!(e.details["object_ids"], json!(["obj-1"]));
+    no_assign_call(&mock);
+}
+
+#[tokio::test]
+async fn assign_with_stale_revision_conflicts_and_writes_nothing() {
+    let mock = Arc::new(MockDriver::new());
+    two_presets(&mock);
+    let t = tools_with(&mock);
+    let rev = revision(&t).await;
+    mock.user_edit("layer_height", "0.3");
+    let e = t.studio_assign_filament(assign(2, rev)).await.unwrap_err();
+    assert_eq!(e.code, ToolErrorCode::RevisionConflict);
+    assert_eq!(e.details["reason"], "revision_mismatch");
+    no_assign_call(&mock);
+}
+
+#[tokio::test]
+async fn assign_while_modal_is_busy_without_a_write() {
+    let mock = Arc::new(MockDriver::new());
+    two_presets(&mock);
+    let t = tools_with(&mock);
+    let rev = revision(&t).await;
+    mock.set_modal(true);
+    let e = t.studio_assign_filament(assign(2, rev)).await.unwrap_err();
+    assert_eq!(e.code, ToolErrorCode::Busy);
+    no_assign_call(&mock);
 }

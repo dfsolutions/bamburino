@@ -173,3 +173,14 @@ pub struct ListFilamentsArgs {
     /// Printer whose AMS to read. Default: the printer selected in Studio.
     pub device_id: Option<String>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AssignFilamentArgs {
+    /// Object to assign the filament to (`studio_list_objects`).
+    pub object_id: String,
+    /// Project filament slot, 1-based, as listed by `studio_list_filaments`.
+    pub filament_slot: u32,
+    /// Revision from `studio_get_state`; the call is refused when stale.
+    pub expected_revision: u64,
+}
