@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Helpers shared by the plate, filament and export tools.
 
-// The tools that use these helpers arrive in later tasks.
+// TODO(Task 6): remove when the plate tools use these helpers.
 #![allow(dead_code)]
 
 use std::future::Future;
@@ -16,9 +16,11 @@ use super::mutate::{read_error, write_error};
 
 /// Runs a plate write with a fresh plate revision. The revision is read
 /// inside this call (a plate revision goes stale at the first snapshot, so
-/// every mutation needs its own read). On `StaleReference` one fresh
-/// `plate_list` and one more call are made; a second stale reply is reported
-/// as a revision conflict. Failures go through `write_error`.
+/// every mutation needs its own read). There is deliberately NO retry: this
+/// runs inside the write lock, so a `StaleReference` can only mean the user
+/// edited Studio between the read and the call, and retrying would overwrite
+/// that edit silently. The failure goes through `write_error`, which yields
+/// the 409 `stale_reference` conflict with nothing written.
 pub(crate) async fn with_plate_revision<T, F, Fut>(
     drv: &Arc<dyn DriverClient>,
     call: F,
@@ -27,15 +29,8 @@ where
     F: Fn(String) -> Fut,
     Fut: Future<Output = Result<T, DriverError>>,
 {
-    let mut retried = false;
-    loop {
-        let list = drv.plate_list().await.map_err(read_error)?;
-        match call(list.plate_revision).await {
-            Ok(v) => return Ok(v),
-            Err(DriverError::StaleReference { .. }) if !retried => retried = true,
-            Err(e) => return Err(write_error(e)),
-        }
-    }
+    let list = drv.plate_list().await.map_err(read_error)?;
+    call(list.plate_revision).await.map_err(write_error)
 }
 
 /// Finds the instance a tool refers to. `instance_id` None means the object's
@@ -58,7 +53,8 @@ pub(crate) fn resolve_instance<'a>(
             .ok_or_else(|| not_found(format!("instance {id} not found on object {object_id}"))),
         None => match obj.instances.as_slice() {
             [only] => Ok(only),
-            [] => Err(not_found(format!("object {object_id} has no instances"))),
+            [] => Err(not_found(format!("object {object_id} has no instances"))
+                .with_details(json!({ "reason": "no_instances" }))),
             many => Err(ToolError::new(
                 ToolErrorCode::InstanceRequired,
                 format!(
@@ -76,7 +72,6 @@ pub(crate) fn resolve_instance<'a>(
 #[cfg(all(test, feature = "mock"))]
 mod tests {
     use super::*;
-    use crate::driver::DriverTool;
     use crate::driver::mock::MockDriver;
 
     fn inst(id: &str) -> Instance {
@@ -107,35 +102,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn with_plate_revision_retries_once_on_stale() {
+    async fn with_plate_revision_does_not_retry_a_stale_revision() {
         let mock = Arc::new(MockDriver::new());
-        mock.fail_tool(DriverTool::PlateRename, stale(), 1);
         let drv: Arc<dyn DriverClient> = mock.clone();
-        let d = drv.clone();
-        with_plate_revision(&drv, |rev| {
-            let d = d.clone();
-            async move { d.plate_rename(0, &rev, "x").await }
-        })
-        .await
-        .unwrap();
-        let lists = mock.calls().iter().filter(|c| *c == "plate_list").count();
-        assert_eq!(lists, 2);
-    }
-
-    #[tokio::test]
-    async fn with_plate_revision_gives_up_after_one_retry() {
-        let mock = Arc::new(MockDriver::new());
-        mock.fail_tool(DriverTool::PlateRename, stale(), 2);
-        let drv: Arc<dyn DriverClient> = mock.clone();
-        let d = drv.clone();
+        let (d, m) = (drv.clone(), mock.clone());
         let err = with_plate_revision(&drv, |rev| {
-            let d = d.clone();
-            async move { d.plate_rename(0, &rev, "x").await }
+            let (d, m) = (d.clone(), m.clone());
+            async move {
+                // Test seam: a Studio edit between the helper's read and the
+                // driver call (setup helpers stale every plate revision).
+                m.add_object("late", "Late", 0);
+                d.plate_rename(0, &rev, "x").await
+            }
         })
         .await
         .unwrap_err();
         assert_eq!(err.code, ToolErrorCode::RevisionConflict);
         assert_eq!(err.details["reason"], "stale_reference");
+        let calls = mock.calls();
+        assert_eq!(calls.iter().filter(|c| *c == "plate_list").count(), 1);
+        let after = drv.plate_list().await.unwrap();
+        assert_ne!(after.plates[0].name, "x");
     }
 
     #[test]
@@ -151,5 +138,9 @@ mod tests {
         assert_eq!(e.code, ToolErrorCode::ObjectNotFound);
         let e = resolve_instance(&two, "zzz", None).unwrap_err();
         assert_eq!(e.code, ToolErrorCode::ObjectNotFound);
+        let empty = [obj(vec![])];
+        let e = resolve_instance(&empty, "o1", None).unwrap_err();
+        assert_eq!(e.code, ToolErrorCode::ObjectNotFound);
+        assert_eq!(e.details["reason"], "no_instances");
     }
 }
