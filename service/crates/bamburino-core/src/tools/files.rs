@@ -14,7 +14,8 @@
 //! Steps 1 to 3 make NO driver call (not even `app_get_state`). Then, under
 //! the write lock: readiness, `BUSY` when a dialog, UI job or slice is
 //! running, the driver write (with `overwrite` passed through verbatim,
-//! default false), a revision refresh, and the file facts.
+//! default false), a revision refresh, and the file facts (read back while
+//! still holding the lock, so the hash describes this call's file).
 //!
 //! The service may run as `LocalService` and be unable to inspect or read
 //! the owner's folders (see `pathguard`). The driver runs as the user and
@@ -101,7 +102,7 @@ fn path_not_allowed(e: PathError) -> ToolError {
             "the destination folder does not exist (folders are not created); choose an existing folder inside the allowed directories".to_string()
         }
         PathError::OutsideRoots => {
-            "the path is outside the allowed directories (allowed_dirs in config.toml, by default the owner's Documents and Downloads)".to_string()
+            "the path is outside the directories allowed in config.toml (allowed_dirs, set by `bamburino config init`); nothing was written".to_string()
         }
         other => format!("{other}; nothing was written"),
     };
@@ -254,7 +255,8 @@ impl Tools {
     }
 
     /// Saves the project (native `.3mf`, not sliced) to a path inside the
-    /// allowed directories. Returns `{path, bytes, sha256,
+    /// allowed directories. A `.gcode.3mf` name is refused (INVALID_ARGUMENT,
+    /// reserved for `studio_export_plate`). Returns `{path, bytes, sha256,
     /// hash_unavailable_reason?, revision}`; the revision is the one after
     /// the save (saving changes the project path and the dirty flag).
     pub async fn studio_save_project(&self, a: SaveProjectArgs) -> Result<Value, ToolError> {
@@ -263,7 +265,7 @@ impl Tools {
         let path =
             lowercase_project_suffix(self.destination(&a.path, FileKind::Project, overwrite)?);
 
-        let revision = {
+        let (revision, facts) = {
             let _serial = self.write_lock.lock().await;
             let app = self
                 .probe
@@ -276,13 +278,16 @@ impl Tools {
                 .project_save(&path, overwrite)
                 .await
                 .map_err(file_write_error)?;
-            self.revision
+            let revision = self
+                .revision
                 .refresh(self.driver.as_ref())
                 .await
-                .map_err(|e| after_write(read_error(e)))?
+                .map_err(|e| after_write(read_error(e)))?;
+            // Still under the lock: no other file tool can replace the file
+            // between the write and the read-back.
+            (revision, file_facts(path.clone()).await)
         };
 
-        let facts = file_facts(path.clone()).await;
         let mut out = json!({
             "path": path.to_string_lossy(),
             "bytes": facts.bytes,
@@ -298,7 +303,8 @@ impl Tools {
     /// Exports the current slice of a plate as `.gcode.3mf` to a path inside
     /// the allowed directories. The plate must be the selected one and carry
     /// a current, completed slice (`NOT_SLICED` otherwise, with a hint); no
-    /// automatic select or re-slice. Returns `{path, plate_index,
+    /// automatic select or re-slice. A plate index beyond the project's plates
+    /// is `PLATE_NOT_FOUND`. Returns `{path, plate_index,
     /// slice_result_id, bytes, sha256, hash_unavailable_reason?, revision}`;
     /// `bytes` is the driver's count.
     pub async fn studio_export_plate(&self, a: ExportPlateArgs) -> Result<Value, ToolError> {
@@ -307,7 +313,7 @@ impl Tools {
         let plate = a.plate_index;
         let path = self.destination(&a.path, FileKind::SlicedPlate, overwrite)?;
 
-        let (exported, revision) = {
+        let (exported, revision, facts) = {
             let _serial = self.write_lock.lock().await;
             let app = self
                 .probe
@@ -359,10 +365,11 @@ impl Tools {
                 .refresh(self.driver.as_ref())
                 .await
                 .map_err(|e| after_write(read_error(e)))?;
-            (exported, revision)
+            // Read back under the lock (see the save).
+            let facts = file_facts(path.clone()).await;
+            (exported, revision, facts)
         };
 
-        let facts = file_facts(path.clone()).await;
         let mut out = json!({
             "path": path.to_string_lossy(),
             "plate_index": plate,

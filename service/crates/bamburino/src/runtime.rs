@@ -82,7 +82,7 @@ pub fn prepare(dir: &ConfigDir, to_stderr: bool) -> Result<Prepared, String> {
     }
     if path_guard.roots().is_empty() {
         tracing::warn!(
-            "allowed_dirs: no usable directory in config.toml; studio_save_project and studio_export_plate refuse every path"
+            "allowed_dirs: no usable directory in config.toml; studio_save_project and studio_export_plate refuse every path. Run `bamburino config init` as the owner from an elevated prompt (it adds the owner's Documents and Downloads when the key is missing), or edit allowed_dirs"
         );
     }
 

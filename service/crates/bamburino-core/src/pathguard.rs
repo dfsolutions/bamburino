@@ -200,7 +200,8 @@ struct Parsed {
 }
 
 impl Parsed {
-    /// True if `other` is strictly inside `self` (case-insensitive).
+    /// True if `other` is strictly inside `self`, comparing names the way
+    /// NTFS does (see [`same_name`]).
     fn contains(&self, other: &Parsed) -> bool {
         self.drive == other.drive
             && other.comps.len() > self.comps.len()
@@ -208,12 +209,29 @@ impl Parsed {
                 .comps
                 .iter()
                 .zip(&other.comps)
-                .all(|(a, b)| a.to_uppercase() == b.to_uppercase())
+                .all(|(a, b)| same_name(a, b))
     }
 
     fn root_string(&self) -> String {
         format!("{}:\\", self.drive)
     }
+}
+
+/// Case-insensitive name equality with a 1:1 fold, like the NTFS `$UpCase`
+/// table: each character is uppercased only when its uppercase is a single
+/// character, otherwise it is compared as it is. Full Unicode uppercasing
+/// is NOT used: it changes lengths (`ß` -> `SS`) and would make `Glaßes`
+/// equal to `Glasses`, two different directories on disk.
+fn same_name(a: &str, b: &str) -> bool {
+    fn fold(c: char) -> char {
+        let mut up = c.to_uppercase();
+        match (up.next(), up.next()) {
+            (Some(u), None) => u,
+            _ => c,
+        }
+    }
+    a.chars().count() == b.chars().count()
+        && a.chars().zip(b.chars()).all(|(x, y)| fold(x) == fold(y))
 }
 
 fn is_drive_form(s: &str) -> bool {

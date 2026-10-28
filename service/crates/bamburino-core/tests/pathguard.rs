@@ -456,3 +456,38 @@ fn inspectable_roots_are_verified() {
     let t = tree();
     assert!(t.guard.unverified_roots().is_empty());
 }
+
+/// Root names are compared like NTFS does (1:1 case fold): `Glaßes` is a
+/// different directory from `Glasses`, although full Unicode uppercasing
+/// maps both to `GLASSES`.
+#[test]
+fn root_containment_uses_a_one_to_one_case_fold() {
+    let t = tree();
+    let root = t.base.join("Glasses");
+    let sibling = t.base.join("Glaßes");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&sibling).unwrap();
+    std::fs::write(sibling.join("x.stl"), b"x").unwrap();
+    let (guard, excluded) = PathGuard::new(vec![root.clone()]);
+    assert!(excluded.is_empty(), "{excluded:?}");
+
+    assert_eq!(
+        guard.check_destination(&s(&sibling.join("x.3mf"))),
+        Err(PathError::OutsideRoots)
+    );
+    assert_eq!(
+        guard.check(&s(&sibling.join("x.stl"))),
+        Err(PathError::OutsideRoots)
+    );
+    // A plain case-only difference is still the same directory.
+    let upper = t.base.join("GLASSES").join("x.3mf");
+    assert_eq!(guard.check_destination(&s(&upper)), Ok(upper.clone()));
+    let lower = t.base.join("glasses").join("x.3mf");
+    assert_eq!(guard.check_destination(&s(&lower)), Ok(lower));
+    // Non-ASCII letters with a 1:1 uppercase still fold (è / È).
+    let accented = t.base.join("Città");
+    std::fs::create_dir_all(&accented).unwrap();
+    let (g2, _) = PathGuard::new(vec![accented]);
+    let caps = t.base.join("CITTÀ").join("x.3mf");
+    assert_eq!(g2.check_destination(&s(&caps)), Ok(caps.clone()));
+}

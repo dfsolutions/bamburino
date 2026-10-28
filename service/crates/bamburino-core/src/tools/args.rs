@@ -258,7 +258,9 @@ pub struct ArrangeArgs {
 pub struct SaveProjectArgs {
     /// Absolute path of the project file, ending `.3mf` (any case), inside one
     /// of the allowed directories (`allowed_dirs` in config.toml). The folder
-    /// must exist; it is not created.
+    /// must exist; it is not created. A `.gcode.3mf` name is refused
+    /// (INVALID_ARGUMENT): it is reserved for sliced plates
+    /// (`studio_export_plate`).
     pub path: String,
     /// Replace an existing file. Default false: an existing file is refused
     /// with FILE_EXISTS.
@@ -269,7 +271,9 @@ pub struct SaveProjectArgs {
 #[serde(deny_unknown_fields)]
 pub struct ExportPlateArgs {
     /// Plate to export, 0-based. It must be the selected plate with a current,
-    /// completed slice (`studio_slice` with `plate_id` = this index).
+    /// completed slice (`studio_slice` with `plate_id` = this index), else
+    /// NOT_SLICED. A plate index beyond the project's plates is
+    /// PLATE_NOT_FOUND.
     pub plate_index: u32,
     /// Absolute path ending `.gcode.3mf` (any case), inside one of the allowed
     /// directories. The folder must exist; it is not created.

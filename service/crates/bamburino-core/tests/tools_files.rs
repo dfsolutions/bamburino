@@ -575,8 +575,84 @@ async fn export_after_slice_returns_path_sha256_bytes_and_slice_result_id() {
     assert_eq!(std::fs::read(&again).unwrap(), bytes);
 }
 
+/// What the mock's `export_sliced_3mf` reports as `bytes` (zip magic plus a
+/// marker), computed independently of any file on disk.
+fn mock_export_bytes(plate: u32, result_id: &str) -> u64 {
+    (4 + format!("bamburino mock sliced plate {plate} {result_id}").len()) as u64
+}
+
+/// Denies the current user READ DATA on the files created in `dir` from now
+/// on (inherit-only ACE, so the directory itself stays listable and
+/// writable): the service-account situation, where Studio writes the file and
+/// the service cannot read it. False when `icacls` fails.
+fn deny_reading_new_files(dir: &Path) -> bool {
+    let user = std::env::var("USERNAME").unwrap_or_default();
+    std::process::Command::new("icacls")
+        .arg(dir)
+        .args(["/deny", &format!("{user}:(OI)(IO)(RD)")])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn undo_deny(dir: &Path) {
+    let user = std::env::var("USERNAME").unwrap_or_default();
+    let _ = std::process::Command::new("icacls")
+        .arg(dir)
+        .args(["/remove:d", &user, "/T"])
+        .output();
+}
+
+/// Review Focus 4 with a REAL access denied on the read-back.
 #[tokio::test]
 async fn export_succeeds_with_null_sha256_when_the_file_is_unreadable() {
+    let env = env();
+    slice_plate(&env.tools, 0).await;
+    let result_id = env.tools.studio_get_state().await.unwrap()["slice"]["slice_result_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let locked = env.allowed.join("locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    if !deny_reading_new_files(&locked) {
+        eprintln!("SKIPPED: cannot set a deny ACE here");
+        return;
+    }
+    let path = locked.join("plate.gcode.3mf");
+    let exported = env.tools.studio_export_plate(export(0, &path, None)).await;
+    let saved = env
+        .tools
+        .studio_save_project(save(&locked.join("p.3mf"), None))
+        .await;
+    let readable = std::fs::read(&path).map_err(|e| e.kind());
+    let on_disk = std::fs::metadata(&path).map(|m| m.len()).ok();
+    undo_deny(&locked);
+    if readable != Err(std::io::ErrorKind::PermissionDenied) {
+        eprintln!("SKIPPED: the deny ACE did not block reading ({readable:?})");
+        return;
+    }
+
+    let r = exported.unwrap();
+    assert!(r["sha256"].is_null(), "{r}");
+    let why = r["hash_unavailable_reason"].as_str().unwrap();
+    assert!(why.contains("could not read"), "{why}");
+    assert_eq!(r["bytes"], mock_export_bytes(0, &result_id), "{r}");
+    assert_eq!(on_disk, Some(mock_export_bytes(0, &result_id)));
+    assert_eq!(r["slice_result_id"], result_id);
+    assert_eq!(r["path"], s(&path));
+
+    // Save: no hash; the length comes from the file metadata, which stays
+    // readable here (only READ DATA is denied).
+    let r = saved.unwrap();
+    assert!(r["sha256"].is_null(), "{r}");
+    assert!(!r["hash_unavailable_reason"].as_str().unwrap().is_empty());
+    let len = std::fs::metadata(locked.join("p.3mf")).unwrap().len();
+    assert_eq!(r["bytes"], len);
+}
+
+/// Same contract when the file is not there at all (the mock writes nothing).
+#[tokio::test]
+async fn export_succeeds_with_null_sha256_when_the_file_is_missing() {
     let env = env();
     env.mock.set_write_files(false);
     slice_plate(&env.tools, 0).await;
@@ -590,9 +666,14 @@ async fn export_succeeds_with_null_sha256_when_the_file_is_unreadable() {
     assert!(r["sha256"].is_null(), "{r}");
     let why = r["hash_unavailable_reason"].as_str().unwrap();
     assert!(!why.is_empty());
-    assert!(r["bytes"].as_u64().unwrap() > 0, "the driver's count: {r}");
     let state = env.tools.studio_get_state().await.unwrap();
-    assert_eq!(r["slice_result_id"], state["slice"]["slice_result_id"]);
+    let result_id = state["slice"]["slice_result_id"].as_str().unwrap();
+    assert_eq!(
+        r["bytes"],
+        mock_export_bytes(0, result_id),
+        "the driver's count"
+    );
+    assert_eq!(r["slice_result_id"], result_id);
 
     // Save: the length comes from the file, so it is null too.
     let r = env
