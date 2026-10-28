@@ -4,7 +4,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bamburino::server::{ServerError, serve_on};
+use bamburino::config::Config;
+use bamburino::server::{ServerError, serve, serve_on};
 use bamburino_core::detect::FixedProcessProbe;
 use bamburino_core::driver::mock::MockDriver;
 use bamburino_core::tools::{ToolConfig, Tools};
@@ -16,8 +17,6 @@ const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789a
 struct Running {
     port: u16,
     http: reqwest::Client,
-    mock: Arc<MockDriver>,
-    tools: Arc<Tools>,
     stop: Option<oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<Result<(), ServerError>>,
 }
@@ -41,19 +40,12 @@ async fn start_with(mock: Arc<MockDriver>, studio_running: bool, poll: Duration)
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let (tx, rx) = oneshot::channel::<()>();
-    let task = tokio::spawn(serve_on(
-        listener,
-        TOKEN.to_owned(),
-        tools.clone(),
-        async move {
-            let _ = rx.await;
-        },
-    ));
+    let task = tokio::spawn(serve_on(listener, TOKEN.to_owned(), tools, async move {
+        let _ = rx.await;
+    }));
     Running {
         port,
         http: reqwest::Client::new(),
-        mock,
-        tools,
         stop: Some(tx),
         task,
     }
@@ -385,39 +377,90 @@ async fn catalog_resource_is_listed_and_readable() {
     s.shutdown().await;
 }
 
-#[tokio::test]
-async fn binds_only_loopback() {
-    let s = start().await;
-    // Any non-loopback IPv4 address of this machine must refuse the port.
-    let sock = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
-    let local = sock
-        .connect("192.0.2.1:9")
-        .ok()
-        .and_then(|()| sock.local_addr().ok())
-        .map(|a| a.ip());
-    match local {
-        Some(ip) if !ip.is_loopback() && !ip.is_unspecified() => {
-            let r = tokio::time::timeout(
-                Duration::from_secs(3),
-                tokio::net::TcpStream::connect((ip, s.port)),
-            )
-            .await;
-            assert!(!matches!(r, Ok(Ok(_))), "reachable on {ip}");
-        }
-        _ => eprintln!("binds_only_loopback: no non-loopback IPv4 address, skipped"),
-    }
-    s.shutdown().await;
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// A non-loopback IPv4 address of this host, if there is one.
+fn local_lan_ip() -> Option<std::net::IpAddr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("192.0.2.1:9").ok()?;
+    let ip = sock.local_addr().ok()?.ip();
+    (ip.is_ipv4() && !ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+}
+
+async fn refused(addr: std::net::SocketAddr) -> bool {
+    !matches!(
+        tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect(addr)).await,
+        Ok(Ok(_))
+    )
 }
 
 #[tokio::test]
-async fn shutdown_finishes_in_flight_request_and_stops_poller() {
+async fn serve_binds_only_127_0_0_1() {
     let mock = Arc::new(MockDriver::new());
-    let s = start_with(mock.clone(), true, Duration::from_millis(40)).await;
-    // Make the poller active.
-    let _ = s.call("studio_get_state", json!({})).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(s.tools.revision_state().current() > 0);
+    let tools = make_tools(&mock, true, Duration::from_secs(60));
+    let port = free_port();
+    let cfg = Config {
+        listen_port: port,
+        ..Config::default()
+    };
+    let (tx, rx) = oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        serve(&cfg, TOKEN.to_owned(), tools, async move {
+            let _ = rx.await;
+        })
+        .await
+    });
+    let loopback = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let http = reqwest::Client::new();
+    let mut up = false;
+    for _ in 0..100 {
+        if let Ok(r) = http.get(format!("http://{loopback}/healthz")).send().await {
+            assert_eq!(r.text().await.unwrap(), "ok");
+            up = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(up, "serve never came up on {loopback}");
+    // Not reachable via IPv6 loopback nor via a LAN address of this host.
+    assert!(refused(std::net::SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port))).await);
+    match local_lan_ip() {
+        Some(ip) => assert!(refused(std::net::SocketAddr::new(ip, port)).await, "{ip}"),
+        None => eprintln!("serve_binds_only_127_0_0_1: no non-loopback IPv4, LAN check skipped"),
+    }
+    let _ = tx.send(());
+    tokio::time::timeout(Duration::from_secs(15), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
 
+#[tokio::test]
+async fn serve_on_refuses_other_loopback_addresses() {
+    let mock = Arc::new(MockDriver::new());
+    let tools = make_tools(&mock, true, Duration::from_secs(60));
+    if let Ok(l) = tokio::net::TcpListener::bind("127.0.0.2:0").await {
+        let r = serve_on(l, TOKEN.to_owned(), tools.clone(), std::future::pending()).await;
+        assert!(matches!(r, Err(ServerError::NotLoopback(_))));
+    }
+    if let Ok(l) = tokio::net::TcpListener::bind("[::1]:0").await {
+        let r = serve_on(l, TOKEN.to_owned(), tools, std::future::pending()).await;
+        assert!(matches!(r, Err(ServerError::NotLoopback(_))));
+    }
+}
+
+#[tokio::test]
+async fn shutdown_finishes_in_flight_request() {
+    let mock = Arc::new(MockDriver::new());
+    let s = start_with(mock.clone(), true, Duration::from_secs(60)).await;
+    let before = mock.calls().len();
     mock.delay_next(Duration::from_millis(600));
     let url = s.url("/mcp");
     let http = s.http.clone();
@@ -435,20 +478,161 @@ async fn shutdown_finishes_in_flight_request_and_stops_poller() {
             .await
             .unwrap()
     });
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // The first driver call of the request is recorded, then delayed: the
+    // request is demonstrably in flight.
+    for _ in 0..200 {
+        if mock.calls().len() > before {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        mock.calls().len() > before,
+        "request never reached the driver"
+    );
     let port = s.port;
-    let mock2 = s.mock.clone();
     s.shutdown().await;
     let reply = parse_reply(&inflight.await.unwrap());
     assert_eq!(reply["result"]["isError"], false, "{reply}");
-    // No new connections.
     assert!(
         tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .is_err()
     );
-    // Poller is gone: the driver sees no more calls.
-    let before = mock2.calls().len();
+}
+
+#[tokio::test]
+async fn shutdown_stops_poller() {
+    let mock = Arc::new(MockDriver::new());
+    let s = start_with(mock.clone(), true, Duration::from_millis(40)).await;
+    let _ = s.call("studio_get_state", json!({})).await; // client active
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let polling = mock.calls().len();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(mock.calls().len() > polling, "poller never polled");
+    s.shutdown().await;
+    let before = mock.calls().len();
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(mock2.calls().len(), before);
+    assert_eq!(mock.calls().len(), before);
+}
+
+#[tokio::test]
+async fn shutdown_is_bounded_when_the_poller_is_stuck_in_a_driver_read() {
+    let mock = Arc::new(MockDriver::new());
+    let s = start_with(mock.clone(), true, Duration::from_millis(40)).await;
+    let _ = s.call("studio_get_state", json!({})).await; // client active
+    let before = mock.calls().len();
+    mock.delay_next(Duration::from_secs(60)); // the next driver read is a poll
+    for _ in 0..200 {
+        if mock.calls().len() > before {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(mock.calls().len() > before, "poller never read");
+    let t = std::time::Instant::now();
+    s.shutdown().await;
+    let took = t.elapsed();
+    assert!(took >= Duration::from_secs(1), "{took:?}"); // waited for the poller
+    assert!(
+        took < bamburino::server::SHUTDOWN_GRACE + bamburino::server::POLLER_GRACE,
+        "{took:?}"
+    );
+}
+
+#[tokio::test]
+async fn no_arg_tools_reject_arguments() {
+    let s = start().await;
+    let r = s.call("studio_get_state", json!({"x": 1})).await;
+    assert_eq!(r["result"]["isError"], true, "{r}");
+    assert_eq!(
+        r["result"]["structuredContent"]["error"]["code"],
+        "INVALID_ARGUMENT"
+    );
+    s.shutdown().await;
+}
+
+#[tokio::test]
+async fn input_schemas_match_the_args_types() {
+    use bamburino_core::tools::{
+        GetSettingsArgs, JobArgs, SearchArgs, SetSettingsArgs, SliceArgs, SummaryArgs,
+        SupportsArgs, TransformArgs,
+    };
+    fn schema<T: schemars::JsonSchema>() -> Value {
+        serde_json::to_value(schemars::schema_for!(T)).unwrap()
+    }
+    let s = start().await;
+    let list = s.rpc(1, "tools/list", json!({})).await;
+    let tools = list["result"]["tools"].as_array().unwrap();
+    let expected: [(&str, Option<Value>); 12] = [
+        ("bamburino_capabilities", None),
+        ("studio_get_state", None),
+        ("studio_get_settings", Some(schema::<GetSettingsArgs>())),
+        ("studio_set_settings", Some(schema::<SetSettingsArgs>())),
+        ("studio_list_models", None),
+        ("studio_transform_model", Some(schema::<TransformArgs>())),
+        ("studio_set_supports", Some(schema::<SupportsArgs>())),
+        ("studio_slice", Some(schema::<SliceArgs>())),
+        ("studio_slice_status", Some(schema::<JobArgs>())),
+        ("studio_cancel_slice", Some(schema::<JobArgs>())),
+        ("studio_get_slice_summary", Some(schema::<SummaryArgs>())),
+        ("catalog_search", Some(schema::<SearchArgs>())),
+    ];
+    for (name, want) in expected {
+        let t = tools.iter().find(|t| t["name"] == name).unwrap();
+        let got = &t["inputSchema"];
+        match want {
+            Some(mut w) => {
+                // The `$schema` and root `title` markers are dropped; everything else is equal.
+                let mut g = got.clone();
+                for k in ["$schema", "title"] {
+                    w.as_object_mut().unwrap().remove(k);
+                    g.as_object_mut().unwrap().remove(k);
+                }
+                assert_eq!(g, w, "{name}");
+            }
+            None => {
+                assert_eq!(got["type"], "object", "{name}");
+                assert!(
+                    got.get("properties")
+                        .is_none_or(|p| p.as_object().is_some_and(|o| o.is_empty())),
+                    "{name}: {got}"
+                );
+            }
+        }
+    }
+    s.shutdown().await;
+}
+
+#[tokio::test]
+async fn host_and_origin_regressions() {
+    let s = start().await;
+    let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
+    let port = s.port;
+    for host in [
+        format!("127.0.0.1.evil:{port}"),
+        "127.0.0.1".to_owned(),
+        "localhost".to_owned(),
+        format!("localhost.evil:{port}"),
+        format!("127.0.0.1:{port}.evil"),
+    ] {
+        let r = s.authed(&body).header("Host", &host).send().await.unwrap();
+        assert_eq!(r.status(), 403, "Host {host}");
+    }
+    for origin in [
+        "null".to_owned(),
+        format!("http://127.0.0.1.evil:{port}"),
+        "http://127.0.0.1".to_owned(),
+        format!("https://127.0.0.1:{port}"),
+        String::new(),
+    ] {
+        let r = s
+            .authed(&body)
+            .header("Origin", &origin)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "Origin {origin:?}");
+    }
+    s.shutdown().await;
 }

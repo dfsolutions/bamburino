@@ -48,6 +48,8 @@ pub struct Tools {
     pub(crate) jobs: std::sync::Mutex<std::collections::HashMap<String, u32>>,
     /// Directory the driver writes temporary G-code exports to (see `slice`).
     pub(crate) export_dir: std::path::PathBuf,
+    /// Set by the first `start_poller` call.
+    poller_started: std::sync::atomic::AtomicBool,
 }
 
 impl Tools {
@@ -88,6 +90,7 @@ impl Tools {
             write_lock: tokio::sync::Mutex::new(()),
             jobs: std::sync::Mutex::new(std::collections::HashMap::new()),
             export_dir,
+            poller_started: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -98,12 +101,20 @@ impl Tools {
 
     /// Starts the revision poller on this tool set's driver; it polls only
     /// while clients are active. Stop it with `revision_state().stop_poller()`.
-    pub fn start_poller(&self) -> tokio::task::JoinHandle<()> {
-        self.revision.clone().spawn_poller(
+    /// Idempotent: only the first call starts a poller; later calls return
+    /// `None`, so a second caller cannot leak one.
+    pub fn start_poller(&self) -> Option<tokio::task::JoinHandle<()>> {
+        if self
+            .poller_started
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return None;
+        }
+        Some(self.revision.clone().spawn_poller(
             self.driver.clone(),
             self.cfg.poll_every,
             self.cfg.idle_after,
-        )
+        ))
     }
 
     pub fn config(&self) -> &ToolConfig {

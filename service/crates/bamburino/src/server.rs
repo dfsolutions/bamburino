@@ -42,6 +42,9 @@ use subtle::ConstantTimeEq;
 
 /// Time in-flight requests get to finish after the shutdown signal.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+/// Time the revision poller gets to leave a driver read in progress; then it
+/// is aborted. Overall bound of a shutdown: `SHUTDOWN_GRACE + POLLER_GRACE`.
+pub const POLLER_GRACE: Duration = Duration::from_secs(2);
 
 /// Resource URI of the catalog (the design name).
 pub const CATALOG_URI: &str = "bambustudio://catalog";
@@ -55,7 +58,7 @@ pub enum ServerError {
         addr: SocketAddr,
         source: std::io::Error,
     },
-    #[error("the listener is not on a loopback address: {0}")]
+    #[error("the listener is not on 127.0.0.1: {0}")]
     NotLoopback(SocketAddr),
     #[error("server error: {0}")]
     Serve(std::io::Error),
@@ -166,8 +169,14 @@ fn parse<T: serde::de::DeserializeOwned>(args: Value) -> Result<T, ToolError> {
 /// `None`: no such tool.
 async fn dispatch(tools: &Tools, name: &str, args: Value) -> Option<Result<Value, ToolError>> {
     Some(match name {
-        "bamburino_capabilities" => Ok(tools.bamburino_capabilities().await),
-        "studio_get_state" => tools.studio_get_state().await,
+        "bamburino_capabilities" => match parse::<NoArgs>(args) {
+            Ok(_) => Ok(tools.bamburino_capabilities().await),
+            Err(e) => Err(e),
+        },
+        "studio_get_state" => match parse::<NoArgs>(args) {
+            Ok(_) => tools.studio_get_state().await,
+            Err(e) => Err(e),
+        },
         "studio_get_settings" => match parse(args) {
             Ok(a) => tools.studio_get_settings(a).await,
             Err(e) => Err(e),
@@ -176,7 +185,10 @@ async fn dispatch(tools: &Tools, name: &str, args: Value) -> Option<Result<Value
             Ok(a) => tools.studio_set_settings(a).await,
             Err(e) => Err(e),
         },
-        "studio_list_models" => tools.studio_list_models().await,
+        "studio_list_models" => match parse::<NoArgs>(args) {
+            Ok(_) => tools.studio_list_models().await,
+            Err(e) => Err(e),
+        },
         "studio_transform_model" => match parse(args) {
             Ok(a) => tools.studio_transform_model(a).await,
             Err(e) => Err(e),
@@ -392,7 +404,8 @@ fn build(port: u16, client_token: String, tools: Arc<Tools>) -> (Router, impl Fn
     (app, move || ct.cancel())
 }
 
-/// Router for `port` (the port the clients connect to).
+/// Router for `port` (the port the clients connect to). Test-only entry: it
+/// does not bind, start the poller or shut down; production uses [`serve`].
 pub fn router(port: u16, client_token: String, tools: Arc<Tools>) -> Router {
     build(port, client_token, tools).0
 }
@@ -411,9 +424,10 @@ pub async fn serve(
     serve_on(listener, client_token, tools, shutdown).await
 }
 
-/// Serves on an already bound loopback listener. On `shutdown`: stops
+/// Serves on an already bound `127.0.0.1` listener (anything else is refused). On `shutdown`: stops
 /// accepting, lets in-flight requests finish for at most [`SHUTDOWN_GRACE`],
-/// stops the revision poller and ends the MCP service.
+/// stops the revision poller (at most [`POLLER_GRACE`]) and ends the MCP
+/// service; the whole shutdown takes at most `SHUTDOWN_GRACE + POLLER_GRACE`.
 pub async fn serve_on(
     listener: tokio::net::TcpListener,
     client_token: String,
@@ -421,11 +435,11 @@ pub async fn serve_on(
     shutdown: impl Future<Output = ()> + Send,
 ) -> Result<(), ServerError> {
     let addr = listener.local_addr().map_err(ServerError::Serve)?;
-    if !addr.ip().is_loopback() {
+    if addr.ip() != std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) {
         return Err(ServerError::NotLoopback(addr));
     }
     let (app, cancel_mcp) = build(addr.port(), client_token, tools.clone());
-    let poller = tools.start_poller();
+    let mut poller = tools.start_poller();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let mut srv = tokio::spawn(async move {
         axum::serve(listener, app)
@@ -458,7 +472,12 @@ pub async fn serve_on(
         }
     };
     cancel_mcp();
-    let _ = poller.await;
+    if let Some(p) = poller.as_mut()
+        && tokio::time::timeout(POLLER_GRACE, &mut *p).await.is_err()
+    {
+        tracing::warn!("revision poller did not stop in time; aborted");
+        p.abort();
+    }
     result
 }
 
