@@ -5,7 +5,7 @@ use std::io;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use bamburino::logging::{self, Redactor, build_subscriber, redact};
+use bamburino::logging::{self, Redactor, build_subscriber, build_subscriber_with_acl, redact};
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 
@@ -41,6 +41,10 @@ fn with_memory_layer(redactor: Redactor, f: impl FnOnce()) -> String {
     let sub = tracing_subscriber::registry().with(logging::layer(buf.clone(), Arc::new(redactor)));
     tracing::subscriber::with_default(sub, f);
     buf.text()
+}
+
+fn sid() -> String {
+    bamburino::acl::current_user_sid().unwrap()
 }
 
 fn log_files(dir: &Path) -> Vec<String> {
@@ -130,7 +134,7 @@ fn layer_redacts_event_fields_and_span_fields() {
 fn log_file_rotates_with_prefix() {
     let tmp = tempfile::tempdir().unwrap();
     {
-        let (sub, guard) = build_subscriber(tmp.path(), 7, false, Vec::new());
+        let (sub, guard) = build_subscriber(tmp.path(), 7, false, &sid(), Vec::new());
         tracing::subscriber::with_default(sub, || tracing::info!("first event"));
         drop(guard);
     }
@@ -152,7 +156,7 @@ fn retention_bounds_the_number_of_files() {
         )
         .unwrap();
     }
-    let (sub, guard) = build_subscriber(tmp.path(), 2, false, Vec::new());
+    let (sub, guard) = build_subscriber(tmp.path(), 2, false, &sid(), Vec::new());
     tracing::subscriber::with_default(sub, || tracing::info!("now"));
     drop(guard);
     let files = log_files(tmp.path());
@@ -168,7 +172,7 @@ fn log_never_contains_token() {
     let tmp = tempfile::tempdir().unwrap();
     let configured = "configured-driver-token-value".to_owned();
     {
-        let (sub, guard) = build_subscriber(tmp.path(), 7, false, vec![configured.clone()]);
+        let (sub, guard) = build_subscriber(tmp.path(), 7, false, &sid(), vec![configured.clone()]);
         tracing::subscriber::with_default(sub, || {
             tracing::info!(
                 "{}",
@@ -192,7 +196,7 @@ fn log_never_contains_token() {
 fn missing_log_dir_is_created_and_unusable_dir_falls_back() {
     let tmp = tempfile::tempdir().unwrap();
     let nested = tmp.path().join("a").join("logs");
-    let (sub, guard) = build_subscriber(&nested, 7, false, Vec::new());
+    let (sub, guard) = build_subscriber(&nested, 7, false, &sid(), Vec::new());
     tracing::subscriber::with_default(sub, || tracing::info!("x"));
     drop(guard);
     assert_eq!(log_files(&nested).len(), 1);
@@ -200,7 +204,7 @@ fn missing_log_dir_is_created_and_unusable_dir_falls_back() {
     // A path below a regular file cannot be created: stderr fallback, no panic.
     let file = tmp.path().join("plain");
     std::fs::write(&file, "x").unwrap();
-    let (sub, guard) = build_subscriber(&file.join("logs"), 7, false, Vec::new());
+    let (sub, guard) = build_subscriber(&file.join("logs"), 7, false, &sid(), Vec::new());
     tracing::subscriber::with_default(sub, || tracing::info!("to stderr"));
     drop(guard);
 }
@@ -208,12 +212,99 @@ fn missing_log_dir_is_created_and_unusable_dir_falls_back() {
 #[test]
 fn init_logging_installs_the_global_subscriber_once() {
     let tmp = tempfile::tempdir().unwrap();
-    let guard = logging::init_logging(tmp.path(), 7, false).expect("first init");
+    let guard = logging::init_logging(tmp.path(), 7, false, &sid()).expect("first init");
     tracing::info!("global event");
     assert!(matches!(
-        logging::init_logging(tmp.path(), 7, false),
+        logging::init_logging(tmp.path(), 7, false, &sid()),
         Err(logging::LogError::AlreadyInitialized)
     ));
     drop(guard);
     assert_eq!(log_files(tmp.path()).len(), 1);
+}
+
+#[test]
+fn acl_failure_means_no_file_and_no_panic() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("logs");
+    let failing = |_: &Path, _: &str| Err(io::Error::other("injected"));
+    let (sub, guard) = build_subscriber_with_acl(&dir, 7, false, &sid(), Vec::new(), &failing);
+    tracing::subscriber::with_default(sub, || tracing::info!("must not reach a file"));
+    drop(guard);
+    assert!(log_files(&dir).is_empty(), "{:?}", log_files(&dir));
+
+    // An existing directory with an unprotected DACL fails the same way.
+    let existing = tmp.path().join("existing");
+    std::fs::create_dir(&existing).unwrap();
+    let (sub, guard) = build_subscriber_with_acl(&existing, 7, false, &sid(), Vec::new(), &failing);
+    tracing::subscriber::with_default(sub, || tracing::info!("must not reach a file"));
+    drop(guard);
+    if cfg!(windows) {
+        assert!(
+            log_files(&existing).is_empty(),
+            "{:?}",
+            log_files(&existing)
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn logs_dir_and_log_file_carry_the_protected_dacl() {
+    use bamburino::secure::security_sddl;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("logs");
+    let me = sid();
+    for round in 0..2 {
+        // Round 0 creates the directory, round 1 re-uses it.
+        let (sub, guard) = build_subscriber(&dir, 7, false, &me, Vec::new());
+        tracing::subscriber::with_default(sub, || tracing::info!("round {round}"));
+        drop(guard);
+    }
+    let d = security_sddl(&dir).unwrap();
+    assert!(d.contains("D:P"), "{d}");
+    for who in [";;;SY)", ";;;BA)", ";;;LS)", &format!(";;;{me})")] {
+        assert!(d.contains(who), "{who} missing: {d}");
+    }
+    assert!(
+        !d.contains(";;;WD") && !d.contains(";;;BU") && !d.contains(";;;AU"),
+        "{d}"
+    );
+    // LOCAL SERVICE can modify (write logs), not just read.
+    assert!(d.contains("(A;OICI;0x1301bf;;;LS)"), "{d}");
+
+    let file = log_files(&dir)[0].clone();
+    let f = security_sddl(&dir.join(file)).unwrap();
+    assert!(
+        f.contains(";;;SY)") && f.contains(";;;LS)") && f.contains(&format!(";;;{me})")),
+        "{f}"
+    );
+    assert!(
+        !f.contains(";;;WD") && !f.contains(";;;BU") && !f.contains(";;;AU"),
+        "{f}"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn an_existing_unprotected_dir_gets_the_acl_reapplied() {
+    use bamburino::secure::security_sddl;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("logs");
+    std::fs::create_dir(&dir).unwrap();
+    assert!(!security_sddl(&dir).unwrap().contains("D:P"));
+    let (sub, guard) = build_subscriber(&dir, 7, false, &sid(), Vec::new());
+    tracing::subscriber::with_default(sub, || tracing::info!("x"));
+    drop(guard);
+    assert!(security_sddl(&dir).unwrap().contains("D:P"));
+    assert_eq!(log_files(&dir).len(), 1);
+}
+
+#[test]
+fn redacts_multi_line_input() {
+    let unc = r"\\srv\share\f.3mf";
+    let text = format!("line1 {HEX64}\nAuthorization: Bearer abc\r\nopen {unc}\nok");
+    assert_eq!(
+        redact(&text),
+        "line1 <redacted-token>\nAuthorization: Bearer <redacted>\r\nopen <unc-path>\nok"
+    );
 }

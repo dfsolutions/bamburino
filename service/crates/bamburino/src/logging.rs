@@ -247,17 +247,46 @@ fn level_from_env() -> LevelFilter {
         .unwrap_or(LevelFilter::INFO)
 }
 
-/// Creates `dir` if missing (with the service ACL) and opens the rotating
-/// appender. `Err` carries a human reason for the stderr fallback.
-fn open_appender(dir: &Path, retention_days: u32) -> Result<RollingFileAppender, String> {
+/// Applies the service ACL to a log directory for `owner_sid`.
+pub type AclFn<'a> = &'a dyn Fn(&Path, &str) -> io::Result<()>;
+
+fn real_acl(dir: &Path, owner_sid: &str) -> io::Result<()> {
+    crate::acl::apply_acl(dir, owner_sid, crate::acl::OwnerAccess::Modify)
+}
+
+/// Whether `dir` already has a protected DACL (no inherited permissions).
+fn dir_protected(dir: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        crate::secure::security_sddl(dir).is_ok_and(|s| s.contains("D:P"))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = dir;
+        true
+    }
+}
+
+/// Makes sure `dir` exists and carries the protected service ACL, then opens
+/// the rotating appender. Nothing is written unless the ACL is in place: `Err`
+/// carries the reason for the stderr fallback.
+fn open_appender(
+    dir: &Path,
+    retention_days: u32,
+    owner_sid: &str,
+    acl: AclFn<'_>,
+) -> Result<RollingFileAppender, String> {
     if !dir.exists() {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-        // Same ACL family as the config directory; the log files inherit it.
-        let acl = crate::acl::current_user_sid()
-            .and_then(|sid| crate::acl::apply_acl(dir, &sid, crate::acl::OwnerAccess::Modify));
-        if let Err(e) = acl {
-            eprintln!("warning: cannot restrict access to {}: {e}", dir.display());
+    }
+    // Log files inherit the directory ACL; apply it when the directory is new
+    // or its DACL is not protected.
+    if !dir_protected(dir) {
+        acl(dir, owner_sid)
+            .map_err(|e| format!("cannot restrict access to {}: {e}", dir.display()))?;
+        if !dir_protected(dir) {
+            return Err(format!("{} is still not access-protected", dir.display()));
         }
     }
     RollingFileAppender::builder()
@@ -270,17 +299,38 @@ fn open_appender(dir: &Path, retention_days: u32) -> Result<RollingFileAppender,
 }
 
 /// The subscriber `init_logging` installs, without installing it. If the log
-/// directory is unusable the subscriber logs to stderr only (with a warning
-/// on stderr): a logging problem never stops the service.
+/// directory is unusable or cannot be protected, the subscriber logs to
+/// stderr only (with a warning on stderr) and never writes a file: a logging
+/// problem never stops the service.
 pub fn build_subscriber(
     dir: &Path,
     retention_days: u32,
     to_stderr: bool,
+    owner_sid: &str,
     secrets: Vec<String>,
+) -> (Box<dyn Subscriber + Send + Sync>, WorkerGuard) {
+    build_subscriber_with_acl(
+        dir,
+        retention_days,
+        to_stderr,
+        owner_sid,
+        secrets,
+        &real_acl,
+    )
+}
+
+/// [`build_subscriber`] with an injectable ACL step (tests).
+pub fn build_subscriber_with_acl(
+    dir: &Path,
+    retention_days: u32,
+    to_stderr: bool,
+    owner_sid: &str,
+    secrets: Vec<String>,
+    acl: AclFn<'_>,
 ) -> (Box<dyn Subscriber + Send + Sync>, WorkerGuard) {
     let redactor = Arc::new(Redactor::new(secrets));
     let registry = tracing_subscriber::registry().with(level_from_env());
-    match open_appender(dir, retention_days) {
+    match open_appender(dir, retention_days, owner_sid, acl) {
         Ok(appender) => {
             let (nb, guard): (NonBlocking, WorkerGuard) = tracing_appender::non_blocking(appender);
             let stderr = to_stderr.then(|| layer(io::stderr, redactor.clone()));
@@ -295,14 +345,16 @@ pub fn build_subscriber(
     }
 }
 
-/// Installs the global subscriber. Keep the guard alive for the process
-/// lifetime: dropping it flushes the file.
+/// Installs the global subscriber. `owner_sid` is the configured installing
+/// user (`Config::owner_sid`), who keeps Modify on the log directory. Keep the
+/// guard alive for the process lifetime: dropping it flushes the file.
 pub fn init_logging(
     dir: &Path,
     retention_days: u32,
     to_stderr: bool,
+    owner_sid: &str,
 ) -> Result<WorkerGuard, LogError> {
-    init_logging_with_secrets(dir, retention_days, to_stderr, Vec::new())
+    init_logging_with_secrets(dir, retention_days, to_stderr, owner_sid, Vec::new())
 }
 
 /// [`init_logging`] that also masks the given literal secret values (the
@@ -311,9 +363,10 @@ pub fn init_logging_with_secrets(
     dir: &Path,
     retention_days: u32,
     to_stderr: bool,
+    owner_sid: &str,
     secrets: Vec<String>,
 ) -> Result<WorkerGuard, LogError> {
-    let (sub, guard) = build_subscriber(dir, retention_days, to_stderr, secrets);
+    let (sub, guard) = build_subscriber(dir, retention_days, to_stderr, owner_sid, secrets);
     tracing::subscriber::set_global_default(sub).map_err(|_| LogError::AlreadyInitialized)?;
     Ok(guard)
 }

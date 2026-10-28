@@ -203,12 +203,19 @@ impl RevisionState {
             .unwrap_or_else(|e| e.into_inner());
         match result {
             Ok(_) => {
-                self.poll_errors.store(0, Ordering::Relaxed);
+                let failed = self.poll_errors.swap(0, Ordering::Relaxed);
+                if failed > 0 {
+                    tracing::info!(failed_polls = failed, "revision poll recovered");
+                }
                 *last = None;
             }
             Err(e) => {
                 let n = self.poll_errors.fetch_add(1, Ordering::Relaxed) + 1;
-                tracing::warn!(poll_errors = n, error = %e, "revision poll failed");
+                // First failure, then every tenth: a down driver must not
+                // fill the log at the poll rate.
+                if n == 1 || n.is_multiple_of(POLL_WARN_EVERY) {
+                    tracing::warn!(poll_errors = n, error = %e, "revision poll failed");
+                }
                 *last = Some(e.to_string());
             }
         }
@@ -238,6 +245,9 @@ impl RevisionState {
         })
     }
 }
+
+/// Consecutive poll failures between two repeated warnings.
+const POLL_WARN_EVERY: u32 = 10;
 
 async fn read_fingerprint(driver: &dyn DriverClient) -> Result<[u8; 32], DriverError> {
     let app = driver.app_state().await?;

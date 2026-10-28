@@ -57,6 +57,7 @@ struct State {
     unreachable: bool,
     modal_open: bool,
     fail_next: Option<DriverError>,
+    fail_after: Option<(usize, DriverError)>,
     delay_next: Option<Duration>,
     // editor state
     settings: BTreeMap<String, String>,
@@ -256,6 +257,7 @@ impl MockDriver {
                 undo_snapshot_supported: true,
                 modal_open: false,
                 fail_next: None,
+                fail_after: None,
                 delay_next: None,
                 settings,
                 plate_overrides: BTreeMap::new(),
@@ -391,6 +393,11 @@ impl MockDriver {
         self.lock().fail_next = Some(err);
     }
 
+    /// The call after the next `skip` calls fails with `err`.
+    pub fn fail_after(&self, skip: usize, err: DriverError) {
+        self.lock().fail_after = Some((skip, err));
+    }
+
     /// The next call (of any kind) sleeps for `d` before running.
     pub fn delay_next(&self, d: Duration) {
         self.lock().delay_next = Some(d);
@@ -421,7 +428,15 @@ impl MockDriver {
             if st.unreachable {
                 return Err(DriverError::Unreachable);
             }
-            (st.delay_next.take(), st.fail_next.take())
+            let mut fail = st.fail_next.take();
+            if fail.is_none() {
+                match st.fail_after.take() {
+                    Some((0, err)) => fail = Some(err),
+                    Some((n, err)) => st.fail_after = Some((n - 1, err)),
+                    None => {}
+                }
+            }
+            (st.delay_next.take(), fail)
         };
         if let Some(d) = delay {
             tokio::time::sleep(d).await;

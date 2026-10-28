@@ -112,6 +112,10 @@ pub(crate) fn driver_error(e: DriverError) -> ToolError {
             ToolErrorCode::DriverUnauthorized,
             "Run: bamburino.exe config set-driver-token",
         ),
+        other @ DriverError::Timeout { after_ms } => {
+            tracing::warn!(after_ms, "driver read timed out");
+            ToolError::new(ToolErrorCode::DriverError, other.to_string())
+        }
         other => ToolError::new(ToolErrorCode::DriverError, other.to_string()),
     }
 }
