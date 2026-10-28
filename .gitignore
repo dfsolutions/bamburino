@@ -10,3 +10,5 @@
 __pycache__/
 /service/.cargo/config.toml
 /build/
+/.worktrees/
+/.serena/
