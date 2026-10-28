@@ -60,6 +60,9 @@ enum ConfigCmd {
     Init,
     /// Save the driver token read from stdin (never printed).
     SetDriverToken,
+    /// Replace the client token with a new random one (never printed; needs
+    /// an elevated prompt). Restart the service and update the MCP client.
+    RotateClientToken,
     /// Print the command that registers Bamburino in an MCP client. This is
     /// the only command that shows the client token.
     ClientSnippet {
@@ -196,7 +199,9 @@ fn not_windows() -> i32 {
 }
 
 /// `config init` (elevated), `config set-driver-token` (token on STDIN, never
-/// echoed, never an argument), `config client-snippet`.
+/// echoed, never an argument), `config rotate-client-token` (elevated,
+/// regenerates `client.token` atomically, never prints it), `config
+/// client-snippet`.
 ///
 /// `set-driver-token` does NOT need elevation and does not call `init`: it
 /// overwrites the existing `driver.token` in place, which the installing
@@ -208,6 +213,7 @@ fn run_config(cmd: &ConfigCmd, config_dir: Option<PathBuf>) -> i32 {
     let result = match cmd {
         ConfigCmd::Init => init_config(&dir),
         ConfigCmd::SetDriverToken => set_driver_token(&dir, explicit),
+        ConfigCmd::RotateClientToken => rotate_client_token(&dir),
         ConfigCmd::ClientSnippet { client } => client_snippet(&dir, *client),
     };
     match result {
@@ -265,6 +271,34 @@ fn set_driver_token(dir: &ConfigDir, explicit: bool) -> Result<(), ConfigError> 
     Ok(())
 }
 
+/// Replaces `client.token` with a fresh token (temp file + rename, same ACL
+/// rules as `config init`). Fails if the token file does not exist yet. The
+/// token is never printed.
+fn rotate_client_token(dir: &ConfigDir) -> Result<(), ConfigError> {
+    use bamburino::acl::{OwnerAccess, apply_acl, current_user_sid};
+    use bamburino::secrets::{generate_token, read_secret, write_secret_atomic};
+
+    let cfg = Config::load(dir)?;
+    let path = dir.client_token_file();
+    let io = |e: std::io::Error| ConfigError::Io(path.clone(), e.to_string());
+    if read_secret(&path).map_err(io)?.is_none() {
+        return Err(ConfigError::Invalid(format!(
+            "{} is missing or empty: run `bamburino config init` (or `--install`) first",
+            path.display()
+        )));
+    }
+    let sid = match cfg.owner_sid {
+        Some(s) => s,
+        None => current_user_sid().map_err(io)?,
+    };
+    write_secret_atomic(&path, &generate_token(), &sid).map_err(io)?;
+    apply_acl(&path, &sid, OwnerAccess::Read).map_err(io)?;
+    println!(
+        "Client token rotated. Restart the Bamburino service and update your MCP client (run `bamburino config client-snippet` in a terminal, not inside an AI session)."
+    );
+    Ok(())
+}
+
 fn client_snippet(dir: &ConfigDir, client: Client) -> Result<(), ConfigError> {
     let cfg = Config::load(dir)?;
     let path = dir.client_token_file();
@@ -272,6 +306,9 @@ fn client_snippet(dir: &ConfigDir, client: Client) -> Result<(), ConfigError> {
         .map_err(|e| ConfigError::Io(path.clone(), e.to_string()))?
         .ok_or_else(|| ConfigError::Invalid(format!("{} is missing or empty", path.display())))?;
     let url = format!("http://127.0.0.1:{}/mcp", cfg.listen_port);
+    eprintln!(
+        "warning: this output contains the client token; run it in a terminal you control, never inside an AI-agent session or a shared log."
+    );
     match client {
         Client::ClaudeCode => println!(
             "claude mcp add --transport http bamburino {url} --header \"Authorization: Bearer {token}\""

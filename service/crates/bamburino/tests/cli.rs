@@ -288,6 +288,64 @@ fn client_snippet_fails_cleanly_without_config() {
         .code(1);
 }
 
+#[test]
+fn client_snippet_warns_on_stderr_and_keeps_stdout() {
+    let dir = config_dir(27556);
+    let out = bamburino()
+        .args(["config", "client-snippet", "--config-dir"])
+        .arg(dir.path())
+        .assert()
+        .success();
+    let o = out.get_output();
+    let (so, se) = (
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr),
+    );
+    assert!(se.contains("warning:"), "{se}");
+    assert!(!so.contains("warning:"), "{so}");
+    assert!(so.contains("claude mcp add"), "{so}");
+}
+
+fn rotate(dir: &Path) -> assert_cmd::assert::Assert {
+    bamburino()
+        .args(["config", "rotate-client-token", "--config-dir"])
+        .arg(dir)
+        .assert()
+}
+
+#[test]
+fn rotate_client_token_replaces_the_token_without_printing_it() {
+    let dir = config_dir(free_port());
+    let file = dir.path().join("client.token");
+    let out = rotate(dir.path()).success();
+    let new = std::fs::read_to_string(&file).unwrap();
+    let new = new.trim();
+    assert_ne!(new, CLIENT_TOKEN);
+    assert_eq!(new.len(), 43, "{new}");
+    assert!(
+        new.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    );
+    let all = both_streams(&out);
+    assert!(!all.contains(new) && !all.contains(CLIENT_TOKEN), "{all}");
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
+    assert!(stdout.contains("Client token rotated."), "{stdout}");
+    assert!(stdout.contains("not inside an AI session"), "{stdout}");
+    // a second rotation changes it again, and no temp file is left behind
+    rotate(dir.path()).success();
+    assert_ne!(std::fs::read_to_string(&file).unwrap().trim(), new);
+    assert!(!dir.path().join(".client.token.tmp").exists());
+}
+
+#[test]
+fn rotate_client_token_fails_without_an_existing_token() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("config.toml"), "").unwrap();
+    let out = rotate(dir.path()).failure().code(1);
+    assert!(both_streams(&out).contains("config init"));
+    assert!(!dir.path().join("client.token").exists());
+}
+
 /// Manual, elevated: see the Task 16 report for the procedure.
 #[test]
 #[ignore = "needs an elevated prompt and changes the machine: run by hand"]

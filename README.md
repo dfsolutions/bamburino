@@ -118,6 +118,8 @@ claude mcp add --transport http bamburino http://127.0.0.1:27600/mcp --header "A
 
 Run that line once. For Codex and any other client use `--client generic`, which prints the URL and the header to enter in the client's MCP configuration. The Codex configuration is `not run`: it has not been tried yet.
 
+**Client token hygiene.** `client-snippet` prints the token, so run it in a terminal you control, never inside an AI-agent session or a shared log (it warns on stderr). If the token has leaked, from an elevated shell run `bamburino.exe config rotate-client-token`: it writes a new token atomically, does not print it, and tells you to restart the Bamburino service and register the client again with `client-snippet`.
+
 The server also publishes the setting catalog as the resource `bamburino://catalog`.
 
 ## Tools

@@ -305,6 +305,9 @@ fn try_install() -> Result<(), String> {
     println!("  1. bamburino config set-driver-token   (token on stdin, never echoed)");
     println!("      (the running service picks the new token up by itself: no restart needed)");
     println!("  2. bamburino config client-snippet     (prints the command for your MCP client)");
+    println!(
+        "      (run it in your own terminal, never inside an AI session; to replace a leaked token: bamburino config rotate-client-token)"
+    );
     Ok(())
 }
 
