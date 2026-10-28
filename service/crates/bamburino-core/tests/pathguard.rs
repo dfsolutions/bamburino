@@ -457,37 +457,61 @@ fn inspectable_roots_are_verified() {
     assert!(t.guard.unverified_roots().is_empty());
 }
 
-/// Root names are compared like NTFS does (1:1 case fold): `Glaßes` is a
-/// different directory from `Glasses`, although full Unicode uppercasing
-/// maps both to `GLASSES`.
+/// Root names match exactly except for ASCII letter case. Unicode case
+/// mapping would equate names NTFS keeps apart (`Glaßes`/`Glasses`,
+/// `Fıddle`/`Fiddle`, `ſass`/`Sass`, `µ`/`μ`, `ς`/`σ`): every such sibling is
+/// outside the root. The cost: a non-ASCII case difference is rejected too.
 #[test]
-fn root_containment_uses_a_one_to_one_case_fold() {
+fn root_containment_folds_ascii_case_only() {
     let t = tree();
-    let root = t.base.join("Glasses");
-    let sibling = t.base.join("Glaßes");
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::create_dir_all(&sibling).unwrap();
-    std::fs::write(sibling.join("x.stl"), b"x").unwrap();
-    let (guard, excluded) = PathGuard::new(vec![root.clone()]);
-    assert!(excluded.is_empty(), "{excluded:?}");
+    // (root, sibling NTFS keeps apart)
+    let pairs = [
+        ("Glasses", "Gla\u{df}es"),   // ß -> SS
+        ("Fiddle", "F\u{131}ddle"),   // dotless ı -> I
+        ("Sass", "\u{17f}ass"),       // long ſ -> S
+        ("\u{3bc}m", "\u{b5}m"),      // Greek μ vs micro sign µ
+        ("Ba\u{3c3}e", "Ba\u{3c2}e"), // σ vs final ς
+    ];
+    for (root_name, sibling_name) in pairs {
+        let root = t.base.join(root_name);
+        let sibling = t.base.join(sibling_name);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        let (guard, excluded) = PathGuard::new(vec![root.clone()]);
+        assert!(excluded.is_empty(), "{excluded:?}");
+        assert_eq!(
+            guard.check_destination(&s(&sibling.join("x.3mf"))),
+            Err(PathError::OutsideRoots),
+            "{sibling_name} must not match root {root_name}"
+        );
+        assert!(guard.check_destination(&s(&root.join("x.3mf"))).is_ok());
+    }
+    let glasses = t.base.join("Gla\u{df}es");
+    std::fs::write(glasses.join("x.stl"), b"x").unwrap();
+    let (guard, _) = PathGuard::new(vec![t.base.join("Glasses")]);
+    assert_eq!(
+        guard.check(&s(&glasses.join("x.stl"))),
+        Err(PathError::OutsideRoots)
+    );
 
-    assert_eq!(
-        guard.check_destination(&s(&sibling.join("x.3mf"))),
-        Err(PathError::OutsideRoots)
-    );
-    assert_eq!(
-        guard.check(&s(&sibling.join("x.stl"))),
-        Err(PathError::OutsideRoots)
-    );
-    // A plain case-only difference is still the same directory.
+    // A plain ASCII case-only difference is still the same directory.
     let upper = t.base.join("GLASSES").join("x.3mf");
     assert_eq!(guard.check_destination(&s(&upper)), Ok(upper.clone()));
     let lower = t.base.join("glasses").join("x.3mf");
     assert_eq!(guard.check_destination(&s(&lower)), Ok(lower));
-    // Non-ASCII letters with a 1:1 uppercase still fold (è / È).
-    let accented = t.base.join("Città");
+    // A non-ASCII case difference is rejected (false rejection by design):
+    // the path must spell `à` as config.toml does.
+    let accented = t.base.join("Citt\u{e0}");
     std::fs::create_dir_all(&accented).unwrap();
-    let (g2, _) = PathGuard::new(vec![accented]);
-    let caps = t.base.join("CITTÀ").join("x.3mf");
-    assert_eq!(g2.check_destination(&s(&caps)), Ok(caps.clone()));
+    let (g2, _) = PathGuard::new(vec![accented.clone()]);
+    let caps = t.base.join("CITT\u{c0}").join("x.3mf");
+    assert_eq!(
+        g2.check_destination(&s(&caps)),
+        Err(PathError::OutsideRoots)
+    );
+    let exact = accented.join("x.3mf");
+    assert_eq!(g2.check_destination(&s(&exact)), Ok(exact.clone()));
+    // ASCII case may still differ around the non-ASCII letter.
+    let mixed = t.base.join("cITT\u{e0}").join("x.3mf");
+    assert_eq!(g2.check_destination(&s(&mixed)), Ok(mixed.clone()));
 }

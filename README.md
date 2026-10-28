@@ -298,7 +298,7 @@ Per-function and CI status, copied from [docs/verification.md](docs/verification
 - **Bearer tokens on both layers.** The client token (generated at install) and the driver token (from Studio) are separate. The client token is compared in constant time. Tokens are not logged and not passed as command-line arguments; the driver token is read from stdin.
 - **Host and Origin checks** against DNS rebinding and browser cross-origin requests.
 - **ACLs.** `%ProgramData%\Bamburino\` has a protected DACL: SYSTEM and Administrators full control, the service account read (modify on `logs\`), the installing user read or modify.
-- **Path allowlist.** `allowed_dirs` defaults to Documents and Downloads of the installing user; the path rules reject traversal, UNC, device names, alternate data streams, symlinks and reparse points.
+- **Path allowlist.** `allowed_dirs` defaults to Documents and Downloads of the installing user; the path rules reject traversal, UNC, device names, alternate data streams, symlinks and reparse points. Roots and paths must match exactly except for ASCII letter case: the agent should use the folder path exactly as `config.toml` spells it (for example, `Città` is not `CITTÀ`).
 - **No shell, no physical actions.** No command is exposed, and no physical action exists in this version.
 - The service runs as `NT AUTHORITY\LocalService`. The CI self-hosted runner is on demand and takes maintainer pushes only: workflows never trigger on pull requests; a fork PR run must be approved by a maintainer — never approve a run that touches `.github/` ([docs/ci-runner.md](docs/ci-runner.md)).
 

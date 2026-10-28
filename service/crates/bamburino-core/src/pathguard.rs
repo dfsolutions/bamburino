@@ -11,6 +11,11 @@
 //! Error values carry no path: callers pass paths through `redact` when they
 //! log them.
 //!
+//! Root containment compares names exactly except for ASCII letter case: a
+//! non-ASCII letter must be spelled as in `config.toml` (`Città` is not
+//! `CITTÀ`). This can only reject a path NTFS would accept, never match a
+//! different folder; agents should use the root exactly as configured.
+//!
 //! # Best-effort link inspection
 //!
 //! The rules are lexical (always enforced, never skipped) plus a walk of the
@@ -200,8 +205,8 @@ struct Parsed {
 }
 
 impl Parsed {
-    /// True if `other` is strictly inside `self`, comparing names the way
-    /// NTFS does (see [`same_name`]).
+    /// True if `other` is strictly inside `self` (names compared by
+    /// [`same_name`]: exact except for ASCII letter case).
     fn contains(&self, other: &Parsed) -> bool {
         self.drive == other.drive
             && other.comps.len() > self.comps.len()
@@ -217,21 +222,14 @@ impl Parsed {
     }
 }
 
-/// Case-insensitive name equality with a 1:1 fold, like the NTFS `$UpCase`
-/// table: each character is uppercased only when its uppercase is a single
-/// character, otherwise it is compared as it is. Full Unicode uppercasing
-/// is NOT used: it changes lengths (`ß` -> `SS`) and would make `Glaßes`
-/// equal to `Glasses`, two different directories on disk.
+/// Name equality for root containment: exact, except for ASCII letter case.
+/// Any non-ASCII difference is a mismatch, even one NTFS would fold
+/// (`À`/`à`): that can only cause a false rejection. Unicode case mapping is
+/// deliberately NOT used, because it equates names NTFS keeps apart
+/// (`ß`/`SS`, `ı`/`i`, `ſ`/`s`, `µ`/`μ`, `ς`/`σ`), which would let a path
+/// into a sibling directory outside the root.
 fn same_name(a: &str, b: &str) -> bool {
-    fn fold(c: char) -> char {
-        let mut up = c.to_uppercase();
-        match (up.next(), up.next()) {
-            (Some(u), None) => u,
-            _ => c,
-        }
-    }
-    a.chars().count() == b.chars().count()
-        && a.chars().zip(b.chars()).all(|(x, y)| fold(x) == fold(y))
+    a.len() == b.len() && a.eq_ignore_ascii_case(b)
 }
 
 fn is_drive_form(s: &str) -> bool {
