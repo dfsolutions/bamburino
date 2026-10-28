@@ -5,6 +5,7 @@
 pub mod args;
 mod arrange;
 mod filaments;
+mod files;
 mod mutate;
 mod plates;
 mod read;
@@ -20,10 +21,11 @@ use crate::errors::{ToolError, ToolErrorCode};
 use crate::revision::RevisionState;
 
 pub use args::{
-    ArrangeArgs, AssignFilamentArgs, Change, GetSettingsArgs, JobArgs, ListFilamentsArgs,
-    MoveToPlateArgs, PlateCreateArgs, PlateDeleteArgs, PlateDeleteContents, PlateRenameArgs,
-    SearchArgs, SetSettingsArgs, SliceArgs, SummaryArgs, SupportKind, SupportSettings,
-    SupportStyle, SupportTarget, SupportsArgs, TargetRef, Transform, TransformArgs, TransformMode,
+    ArrangeArgs, AssignFilamentArgs, Change, ExportPlateArgs, GetSettingsArgs, JobArgs,
+    ListFilamentsArgs, MoveToPlateArgs, PlateCreateArgs, PlateDeleteArgs, PlateDeleteContents,
+    PlateRenameArgs, SaveProjectArgs, SearchArgs, SetSettingsArgs, SliceArgs, SummaryArgs,
+    SupportKind, SupportSettings, SupportStyle, SupportTarget, SupportsArgs, TargetRef, Transform,
+    TransformArgs, TransformMode,
 };
 pub use filaments::{normalize_ams_colour, parse_project_colours};
 pub use mutate::compose_rotation_deg;
@@ -50,8 +52,9 @@ pub struct Tools {
     pub(crate) jobs: std::sync::Mutex<std::collections::HashMap<String, u32>>,
     /// Directory the driver writes temporary G-code exports to (see `slice`).
     pub(crate) export_dir: std::path::PathBuf,
-    /// Directory allowlist for the tools that will take paths (none does in
-    /// the MVP); set once by the service at startup.
+    /// Directory allowlist of the tools that take a user path
+    /// (`studio_save_project`, `studio_export_plate`); set once by the service
+    /// at startup. Not set: every such path is refused.
     path_guard: std::sync::OnceLock<crate::pathguard::PathGuard>,
     /// Poll period of the job-wait loops (plates, arrange, export).
     pub(crate) job_poll_every: Duration,
@@ -121,7 +124,8 @@ impl Tools {
     }
 
     /// The path allowlist, if the service installed one. Every tool that
-    /// accepts a path must go through `PathGuard::check`.
+    /// accepts a path must go through `PathGuard::check` (existing file) or
+    /// `PathGuard::check_destination` (file to write).
     pub fn path_guard(&self) -> Option<&crate::pathguard::PathGuard> {
         self.path_guard.get()
     }

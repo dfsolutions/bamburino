@@ -10,6 +10,19 @@
 //!
 //! Error values carry no path: callers pass paths through `redact` when they
 //! log them.
+//!
+//! # Best-effort link inspection
+//!
+//! The rules are lexical (always enforced, never skipped) plus a walk of the
+//! file system that refuses symlinks and junctions. The service may run as
+//! `LocalService`, which usually cannot list the owner's profile folders.
+//! Where the walk of a ROOT or of a DESTINATION hits "access denied" it stops
+//! inspecting, the caller logs a warning, and the lexically valid path is
+//! accepted: the driver, which runs as the user, validates the directory
+//! itself (it must exist) and the write happens with the user's rights. Such
+//! a root is kept and listed by [`PathGuard::unverified_roots`]. Every other
+//! failure (a missing component, a link, a file used as a directory) still
+//! refuses, and [`PathGuard::check`] (existing entries) stays strict.
 
 use std::path::{Path, PathBuf};
 
@@ -53,6 +66,8 @@ pub enum PathError {
 #[derive(Debug, Clone)]
 pub struct PathGuard {
     roots: Vec<PathBuf>,
+    /// Roots accepted on lexical grounds only (access denied while walking).
+    unverified: Vec<PathBuf>,
 }
 
 impl PathGuard {
@@ -62,14 +77,33 @@ impl PathGuard {
     /// with no root rejects everything with `OutsideRoots`.
     pub fn new(roots: Vec<PathBuf>) -> (PathGuard, Vec<(PathBuf, PathError)>) {
         let mut valid = Vec::new();
+        let mut unverified = Vec::new();
         let mut excluded = Vec::new();
         for root in roots {
             match validate_root(&root) {
-                Ok(normalized) => valid.push(normalized),
+                Ok(w) => {
+                    if !w.verified {
+                        unverified.push(w.path.clone());
+                    }
+                    valid.push(w.path);
+                }
                 Err(e) => excluded.push((root, e)),
             }
         }
-        (PathGuard { roots: valid }, excluded)
+        (
+            PathGuard {
+                roots: valid,
+                unverified,
+            },
+            excluded,
+        )
+    }
+
+    /// Accepted roots this process could not fully inspect (access denied,
+    /// typically the owner's profile seen from `LocalService`). They are
+    /// included in [`Self::roots`]; the caller logs them as a warning.
+    pub fn unverified_roots(&self) -> &[PathBuf] {
+        &self.unverified
     }
 
     /// The accepted roots (normalized).
@@ -81,26 +115,81 @@ impl PathGuard {
     /// an allowed root; returns it normalized (`X:\a\b`, no `\\?\` prefix).
     pub fn check(&self, candidate: &str) -> Result<PathBuf, PathError> {
         let parsed = parse(candidate)?;
-        let inside = self.roots.iter().any(|r| {
-            parse(&r.to_string_lossy())
-                .map(|rp| rp.contains(&parsed))
-                .unwrap_or(false)
-        });
-        if !inside {
+        if !self.is_inside(&parsed) {
             return Err(PathError::OutsideRoots);
         }
-        walk(&parsed)
+        walk(&parsed, Inspect::Strict).map(|w| w.path)
+    }
+
+    /// For a file that may not exist yet (a write destination). Same lexical
+    /// rules as [`Self::check`]; the file must be strictly inside an allowed
+    /// root (the root itself is refused), the PARENT must exist and be a
+    /// plain directory with no symlink or junction on the way, and an
+    /// existing target must not be a symlink or junction. Returns the
+    /// normalized path (`X:\a\b.3mf`, no `\\?\` prefix).
+    ///
+    /// Best effort (module docs): where this process gets "access denied"
+    /// the inspection stops with a warning and the lexically valid path is
+    /// returned; the driver then validates the directory as the user.
+    pub fn check_destination(&self, candidate: &str) -> Result<PathBuf, PathError> {
+        let parsed = parse(candidate)?;
+        if !self.is_inside(&parsed) {
+            return Err(PathError::OutsideRoots);
+        }
+        let Some((name, parent_comps)) = parsed.comps.split_last() else {
+            // Unreachable: strictly inside a root means one component at least.
+            return Err(PathError::OutsideRoots);
+        };
+        let parent = Parsed {
+            drive: parsed.drive,
+            comps: parent_comps.to_vec(),
+        };
+        let walked = walk(&parent, Inspect::BestEffort)?;
+        let mut target = walked.path.to_string_lossy().into_owned();
+        if !target.ends_with('\\') {
+            target.push('\\');
+        }
+        target.push_str(name);
+        if !walked.verified {
+            tracing::warn!(
+                "pathguard: this account cannot inspect the destination directory; Bambu Studio validates it"
+            );
+            return Ok(PathBuf::from(target));
+        }
+        if !walked.path.is_dir() {
+            return Err(PathError::NotFound);
+        }
+        match std::fs::symlink_metadata(&target) {
+            Ok(meta) if is_rejected_link(&target, &meta) => Err(PathError::ReparsePoint),
+            Ok(_) => Ok(PathBuf::from(target)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(PathBuf::from(target)),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                tracing::warn!(
+                    "pathguard: this account cannot inspect the destination file; Bambu Studio validates it"
+                );
+                Ok(PathBuf::from(target))
+            }
+            Err(_) => Err(PathError::NotFound),
+        }
+    }
+
+    fn is_inside(&self, parsed: &Parsed) -> bool {
+        self.roots.iter().any(|r| {
+            parse(&r.to_string_lossy())
+                .map(|rp| rp.contains(parsed))
+                .unwrap_or(false)
+        })
     }
 }
 
-fn validate_root(root: &Path) -> Result<PathBuf, PathError> {
+fn validate_root(root: &Path) -> Result<Walked, PathError> {
     let text = root.to_str().ok_or(PathError::Relative)?;
     let parsed = parse(text)?;
-    let normalized = walk(&parsed)?;
-    if !normalized.is_dir() {
+    let walked = walk(&parsed, Inspect::BestEffort)?;
+    if walked.verified && !walked.path.is_dir() {
         return Err(PathError::NotFound);
     }
-    Ok(normalized)
+    Ok(walked)
 }
 
 /// A lexically valid absolute drive path.
@@ -217,17 +306,50 @@ fn is_reserved_stem(stem: &str) -> bool {
     false
 }
 
+/// How [`walk`] treats a component this process may not inspect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Inspect {
+    /// Any failure to read a component refuses (`NotFound`).
+    Strict,
+    /// "Access denied" ends the inspection; the rest is accepted lexically.
+    BestEffort,
+}
+
+/// What [`walk`] returns: the normalized path, and whether every component
+/// was inspected.
+#[derive(Debug)]
+struct Walked {
+    path: PathBuf,
+    verified: bool,
+}
+
 /// Walks the path from the drive root, refusing symlinks and junctions at
-/// every level; every component must exist.
-fn walk(p: &Parsed) -> Result<PathBuf, PathError> {
+/// every level; every component must exist. In `BestEffort` mode an "access
+/// denied" ends the inspection: the remaining components (already checked
+/// lexically by `parse`) are appended as they are and `verified` is false.
+fn walk(p: &Parsed, mode: Inspect) -> Result<Walked, PathError> {
     let mut cur = p.root_string();
     let last = p.comps.len();
+    let mut verified = true;
     for (i, c) in p.comps.iter().enumerate() {
         if !cur.ends_with('\\') {
             cur.push('\\');
         }
         cur.push_str(c);
-        let meta = std::fs::symlink_metadata(&cur).map_err(|_| PathError::NotFound)?;
+        if !verified {
+            continue;
+        }
+        let meta = match std::fs::symlink_metadata(&cur) {
+            Ok(m) => m,
+            Err(e)
+                if mode == Inspect::BestEffort
+                    && e.kind() == std::io::ErrorKind::PermissionDenied =>
+            {
+                verified = false;
+                continue;
+            }
+            Err(_) => return Err(PathError::NotFound),
+        };
         if is_rejected_link(&cur, &meta) {
             return Err(PathError::ReparsePoint);
         }
@@ -235,7 +357,10 @@ fn walk(p: &Parsed) -> Result<PathBuf, PathError> {
             return Err(PathError::NotFound);
         }
     }
-    Ok(PathBuf::from(cur))
+    Ok(Walked {
+        path: PathBuf::from(cur),
+        verified,
+    })
 }
 
 #[cfg(windows)]

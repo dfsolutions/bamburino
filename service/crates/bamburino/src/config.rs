@@ -53,17 +53,35 @@ impl Default for Config {
             mutation_timeout_ms: MIN_MUTATION_TIMEOUT_MS,
             poll_interval_ms: 1_500,
             allow_version_mismatch: false,
-            allowed_dirs: default_allowed_dirs(),
+            // Deliberately empty: the defaults are the OWNER's folders, resolved
+            // by `config init` (run by the owner) and written to the file. The
+            // service may run as LocalService, whose Known Folders are not the
+            // owner's, so nothing is resolved when the file is loaded: a file
+            // without `allowed_dirs` allows no directory.
+            allowed_dirs: Vec::new(),
             log_retention_days: 7,
             owner_sid: None,
         }
     }
 }
 
-/// Documents and Downloads of the user running the installer, from the
-/// Known Folder API (follows OneDrive redirection); `%USERPROFILE%` is only
-/// the fallback.
-fn default_allowed_dirs() -> Vec<PathBuf> {
+impl Config {
+    /// The defaults written by `config init` and by a plain test/smoke
+    /// configuration: [`Config::default`] plus the allowed directories of the
+    /// user running this process ([`default_allowed_dirs`]). Never called by
+    /// the service at load time.
+    pub fn defaults_for_current_user() -> Config {
+        Config {
+            allowed_dirs: default_allowed_dirs(),
+            ..Config::default()
+        }
+    }
+}
+
+/// Documents and Downloads of the user running this process (the owner, at
+/// `config init`), from the Known Folder API (follows OneDrive redirection);
+/// `%USERPROFILE%` is only the fallback.
+pub fn default_allowed_dirs() -> Vec<PathBuf> {
     #[cfg(windows)]
     {
         use windows_sys::Win32::UI::Shell::{FOLDERID_Documents, FOLDERID_Downloads};
@@ -260,9 +278,11 @@ impl ConfigDir {
 
         let cfg_path = self.config_file();
         if !cfg_path.exists() {
+            // `config init` runs as the owner: this is where the owner's
+            // Documents and Downloads are resolved and stored.
             let cfg = Config {
                 owner_sid: Some(installer.clone()),
-                ..Config::default()
+                ..Config::defaults_for_current_user()
             };
             let mut f = create_restricted_file(&cfg_path, &installer, OwnerAccess::Read)
                 .map_err(|e| io(&cfg_path, e))?;

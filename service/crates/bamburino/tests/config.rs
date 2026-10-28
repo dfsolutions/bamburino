@@ -38,6 +38,33 @@ fn empty_file_loads_defaults() {
     assert_eq!(c.listen_port, 27600);
 }
 
+/// The service may run as LocalService: loading the file must never resolve
+/// Known Folders (they would be the service account's, not the owner's).
+#[test]
+fn loading_never_resolves_allowed_dirs() {
+    assert!(Config::default().allowed_dirs.is_empty());
+    assert!(load_str("").unwrap().allowed_dirs.is_empty());
+    let c = load_str("allowed_dirs = ['D:\\Prints']\n").unwrap();
+    assert_eq!(c.allowed_dirs, vec![std::path::PathBuf::from(r"D:\Prints")]);
+}
+
+/// `config init` (run as the owner) writes the owner's Documents and
+/// Downloads into the file; that stored list is what the service uses.
+#[test]
+fn defaults_for_the_current_user_name_documents_and_downloads() {
+    let c = Config::defaults_for_current_user();
+    assert_eq!(c.allowed_dirs.len(), 2, "{:?}", c.allowed_dirs);
+    assert!(c.allowed_dirs.iter().all(|d| d.is_absolute()));
+    assert_eq!(
+        c.allowed_dirs,
+        bamburino::config::default_allowed_dirs(),
+        "same list as the Known Folder lookup"
+    );
+    // Round trip through the file keeps them.
+    let back = load_str(&c.to_toml()).unwrap();
+    assert_eq!(back.allowed_dirs, c.allowed_dirs);
+}
+
 #[test]
 fn missing_file_is_an_error() {
     let tmp = tempfile::tempdir().unwrap();
