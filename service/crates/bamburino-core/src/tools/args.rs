@@ -166,3 +166,119 @@ pub struct SummaryArgs {
     /// that can hold a current slice result.
     pub plate_id: Option<u32>,
 }
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListFilamentsArgs {
+    /// Printer whose AMS to read. Default: the printer selected in Studio.
+    pub device_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AssignFilamentArgs {
+    /// Object to assign the filament to (`studio_list_models`).
+    pub object_id: String,
+    /// Project filament slot, 1-based, as listed by `studio_list_filaments`.
+    pub filament_slot: u32,
+    /// Revision from `studio_get_state`; the call is refused when stale.
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlateCreateArgs {
+    /// Name for the new plate. Default: the driver's "Plate N".
+    pub name: Option<String>,
+    /// Revision from `studio_get_state`; the call is refused when stale.
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlateRenameArgs {
+    /// Plate to rename, 0-based (`studio_get_state` `plates[].plate_id`).
+    pub plate_index: u32,
+    /// New name; must not be empty.
+    pub name: String,
+    /// Revision from `studio_get_state`; the call is refused when stale.
+    pub expected_revision: u64,
+}
+
+/// What `studio_plate_delete` does with the instances on the plate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlateDeleteContents {
+    /// Move the instances to `target_plate_index` (must be empty and unlocked).
+    Move,
+    /// Delete the instances; objects left without instances go too.
+    Delete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlateDeleteArgs {
+    /// Plate to delete, 0-based. Later plates are renumbered.
+    pub plate_index: u32,
+    /// Required when the plate is not empty.
+    pub contents: Option<PlateDeleteContents>,
+    /// Destination plate for `contents: "move"`; refused with any other value.
+    pub target_plate_index: Option<u32>,
+    /// Revision from `studio_get_state`; the call is refused when stale.
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MoveToPlateArgs {
+    /// Object the instance belongs to (`studio_list_models`).
+    pub object_id: String,
+    /// Instance to move. Optional only when the object has a single instance.
+    pub instance_id: Option<String>,
+    /// Destination plate, 0-based.
+    pub plate_index: u32,
+    /// Revision from `studio_get_state`; the call is refused when stale.
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ArrangeArgs {
+    /// Plate to select before arranging, 0-based. SIDE EFFECT: that plate
+    /// stays selected afterwards (the result reports `previous_plate_index`).
+    /// The driver arranges the whole project (`scope: "project"`) whichever
+    /// plate is selected, so objects may move to other plates.
+    pub plate_index: u32,
+    /// Revision from `studio_get_state`; the call is refused when stale.
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SaveProjectArgs {
+    /// Absolute path of the project file, ending `.3mf` (any case), inside one
+    /// of the allowed directories (`allowed_dirs` in config.toml). The folder
+    /// must exist; it is not created. A `.gcode.3mf` name is refused
+    /// (INVALID_ARGUMENT): it is reserved for sliced plates
+    /// (`studio_export_plate`).
+    pub path: String,
+    /// Replace an existing file. Default false: an existing file is refused
+    /// with FILE_EXISTS.
+    pub overwrite: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExportPlateArgs {
+    /// Plate to export, 0-based. It must be the selected plate with a current,
+    /// completed slice (`studio_slice` with `plate_id` = this index), else
+    /// NOT_SLICED. A plate index beyond the project's plates is
+    /// PLATE_NOT_FOUND.
+    pub plate_index: u32,
+    /// Absolute path ending `.gcode.3mf` (any case), inside one of the allowed
+    /// directories. The folder must exist; it is not created.
+    pub path: String,
+    /// Replace an existing file. Default false: an existing file is refused
+    /// with FILE_EXISTS.
+    pub overwrite: Option<bool>,
+}

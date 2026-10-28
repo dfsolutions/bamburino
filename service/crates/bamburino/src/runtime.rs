@@ -64,11 +64,25 @@ pub fn prepare(dir: &ConfigDir, to_stderr: bool) -> Result<Prepared, String> {
         secrets,
     )
     .map_err(|e| e.to_string())?;
+    // `allowed_dirs` comes from config.toml only (written by `config init` as
+    // the owner); nothing is resolved here, where the process may be
+    // LocalService with a profile that is not the owner's.
     let (path_guard, excluded_roots) = PathGuard::new(cfg.allowed_dirs.clone());
     for (root, why) in &excluded_roots {
         tracing::warn!(
             "allowed_dirs: ignoring {}: {why}",
             redact(&root.display().to_string())
+        );
+    }
+    for root in path_guard.unverified_roots() {
+        tracing::warn!(
+            "allowed_dirs: {} cannot be inspected by this account; links inside it are not checked here, Bambu Studio validates destinations itself",
+            redact(&root.display().to_string())
+        );
+    }
+    if path_guard.roots().is_empty() {
+        tracing::warn!(
+            "allowed_dirs: no usable directory in config.toml; studio_save_project and studio_export_plate refuse every path. Run `bamburino config init` as the owner from an elevated prompt (it adds the owner's Documents and Downloads when the key is missing), or edit allowed_dirs"
         );
     }
 
@@ -147,8 +161,11 @@ pub fn ensure_plain_config(dir: &ConfigDir) -> Result<Vec<String>, String> {
     std::fs::create_dir_all(&dir.0)
         .map_err(|e| format!("cannot create {}: {e}", dir.0.display()))?;
     if !dir.config_file().exists() {
-        std::fs::write(dir.config_file(), Config::default().to_toml())
-            .map_err(|e| format!("cannot write {}: {e}", dir.config_file().display()))?;
+        std::fs::write(
+            dir.config_file(),
+            Config::defaults_for_current_user().to_toml(),
+        )
+        .map_err(|e| format!("cannot write {}: {e}", dir.config_file().display()))?;
         made.push(dir.config_file().display().to_string());
     }
     let tok = dir.client_token_file();

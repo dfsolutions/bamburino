@@ -30,8 +30,9 @@ use super::args::{
 use super::{Tools, driver_error};
 use crate::driver::map::OVERRIDE_KEYS;
 use crate::driver::{
-    AbsoluteTransform, ActivePresets, AppState, DriverCapabilities, DriverClient, DriverError,
-    DriverJob, EffectiveSetting, Instance, ModelObject, PlateList, SettingsTarget, SliceState,
+    AbsoluteTransform, ActivePresets, AmsInventory, AppState, DeviceSummary, DriverCapabilities,
+    DriverClient, DriverError, DriverJob, EffectiveSetting, ExportedPlate, FilamentAssignment,
+    Instance, ModelObject, PlateContents, PlateDeleted, PlateList, SettingsTarget, SliceState,
     SliceSummary,
 };
 use crate::errors::{ToolError, ToolErrorCode};
@@ -127,6 +128,55 @@ impl DriverClient for CountingDriver {
         path: &std::path::Path,
     ) -> Result<DriverJob, DriverError> {
         self.inner.export_gcode(p, r, s, path).await
+    }
+    async fn plate_create(&self) -> Result<PlateList, DriverError> {
+        self.bump(self.inner.plate_create().await)
+    }
+    async fn plate_rename(&self, i: u32, r: &str, n: &str) -> Result<PlateList, DriverError> {
+        self.bump(self.inner.plate_rename(i, r, n).await)
+    }
+    async fn plate_delete(
+        &self,
+        i: u32,
+        r: &str,
+        c: PlateContents,
+        t: Option<u32>,
+    ) -> Result<PlateDeleted, DriverError> {
+        self.bump(self.inner.plate_delete(i, r, c, t).await)
+    }
+    async fn plate_move_instance(
+        &self,
+        o: &str,
+        n: &str,
+        i: u32,
+        r: &str,
+    ) -> Result<PlateList, DriverError> {
+        self.bump(self.inner.plate_move_instance(o, n, i, r).await)
+    }
+    async fn filament_assign(&self, o: &str, i: u32) -> Result<FilamentAssignment, DriverError> {
+        self.bump(self.inner.filament_assign(o, i).await)
+    }
+    async fn arrange_start(&self) -> Result<DriverJob, DriverError> {
+        self.bump(self.inner.arrange_start().await)
+    }
+    async fn device_list(&self) -> Result<Vec<DeviceSummary>, DriverError> {
+        self.inner.device_list().await
+    }
+    async fn ams_inventory(&self, d: &str) -> Result<AmsInventory, DriverError> {
+        self.inner.ams_inventory(d).await
+    }
+    async fn project_save(&self, p: &std::path::Path, o: bool) -> Result<(), DriverError> {
+        self.inner.project_save(p, o).await
+    }
+    async fn export_sliced_3mf(
+        &self,
+        i: u32,
+        r: &str,
+        s: &str,
+        p: &std::path::Path,
+        o: bool,
+    ) -> Result<ExportedPlate, DriverError> {
+        self.inner.export_sliced_3mf(i, r, s, p, o).await
     }
 }
 
@@ -897,7 +947,11 @@ pub fn compose_rotation_deg(current: [f64; 3], delta: [f64; 3]) -> [f64; 3] {
 }
 
 fn transform_json(i: &Instance) -> Value {
-    json!({ "position_mm": i.position_mm, "rotation_deg": i.rotation_deg, "scale": i.scale })
+    json!({
+        "position_mm": i.position_mm,
+        "rotation_deg": super::read::normalize_zero(i.rotation_deg),
+        "scale": i.scale,
+    })
 }
 
 fn find_instance<'a>(

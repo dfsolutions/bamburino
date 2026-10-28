@@ -3,7 +3,11 @@
 //! `read`.
 
 pub mod args;
+mod arrange;
+mod filaments;
+mod files;
 mod mutate;
+mod plates;
 mod read;
 mod slice;
 
@@ -17,10 +21,13 @@ use crate::errors::{ToolError, ToolErrorCode};
 use crate::revision::RevisionState;
 
 pub use args::{
-    Change, GetSettingsArgs, JobArgs, SearchArgs, SetSettingsArgs, SliceArgs, SummaryArgs,
+    ArrangeArgs, AssignFilamentArgs, Change, ExportPlateArgs, GetSettingsArgs, JobArgs,
+    ListFilamentsArgs, MoveToPlateArgs, PlateCreateArgs, PlateDeleteArgs, PlateDeleteContents,
+    PlateRenameArgs, SaveProjectArgs, SearchArgs, SetSettingsArgs, SliceArgs, SummaryArgs,
     SupportKind, SupportSettings, SupportStyle, SupportTarget, SupportsArgs, TargetRef, Transform,
     TransformArgs, TransformMode,
 };
+pub use filaments::{normalize_ams_colour, parse_project_colours};
 pub use mutate::compose_rotation_deg;
 
 #[derive(Debug, Clone)]
@@ -45,16 +52,22 @@ pub struct Tools {
     pub(crate) jobs: std::sync::Mutex<std::collections::HashMap<String, u32>>,
     /// Directory the driver writes temporary G-code exports to (see `slice`).
     pub(crate) export_dir: std::path::PathBuf,
-    /// Directory allowlist for the tools that will take paths (none does in
-    /// the MVP); set once by the service at startup.
+    /// Directory allowlist of the tools that take a user path
+    /// (`studio_save_project`, `studio_export_plate`); set once by the service
+    /// at startup. Not set: every such path is refused.
     path_guard: std::sync::OnceLock<crate::pathguard::PathGuard>,
+    /// Poll period of the job-wait loops (plates, arrange, export).
+    pub(crate) job_poll_every: Duration,
+    /// Upper bound of a job-wait loop.
+    pub(crate) job_timeout: Duration,
     /// Set by the first `start_poller` call.
     poller_started: std::sync::atomic::AtomicBool,
 }
 
 impl Tools {
-    /// The 12 tool names, in the order of the design (section 5).
-    pub const NAMES: [&'static str; 12] = [
+    /// The 21 tool names: the original 12 in the order of the design
+    /// (section 5), then the plate, filament and file tools.
+    pub const NAMES: [&'static str; 21] = [
         "bamburino_capabilities",
         "studio_get_state",
         "studio_get_settings",
@@ -67,6 +80,15 @@ impl Tools {
         "studio_cancel_slice",
         "studio_get_slice_summary",
         "catalog_search",
+        "studio_list_filaments",
+        "studio_assign_filament",
+        "studio_plate_create",
+        "studio_plate_rename",
+        "studio_plate_delete",
+        "studio_move_to_plate",
+        "studio_arrange",
+        "studio_save_project",
+        "studio_export_plate",
     ];
 
     /// `export_dir`: where the driver may write temporary G-code exports. It
@@ -92,8 +114,18 @@ impl Tools {
             jobs: std::sync::Mutex::new(std::collections::HashMap::new()),
             export_dir,
             path_guard: std::sync::OnceLock::new(),
+            job_poll_every: Duration::from_millis(500),
+            job_timeout: Duration::from_secs(120),
             poller_started: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Overrides the job-wait settings (defaults 500 ms / 120 s); tests use
+    /// short values.
+    pub fn with_job_wait(mut self, poll_every: Duration, timeout: Duration) -> Self {
+        self.job_poll_every = poll_every;
+        self.job_timeout = timeout;
+        self
     }
 
     /// Installs the path allowlist (first call wins).
@@ -102,7 +134,8 @@ impl Tools {
     }
 
     /// The path allowlist, if the service installed one. Every tool that
-    /// accepts a path must go through `PathGuard::check`.
+    /// accepts a path must go through `PathGuard::check` (existing file) or
+    /// `PathGuard::check_destination` (file to write).
     pub fn path_guard(&self) -> Option<&crate::pathguard::PathGuard> {
         self.path_guard.get()
     }

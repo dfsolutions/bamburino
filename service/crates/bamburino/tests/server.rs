@@ -115,7 +115,7 @@ fn init_params() -> Value {
 }
 
 #[tokio::test]
-async fn lists_exactly_twelve_tools_with_exact_names() {
+async fn tools_list_has_21_tools_in_names_order_with_read_only_annotations() {
     let s = start().await;
     let init = s.rpc(1, "initialize", init_params()).await;
     assert!(init["result"]["serverInfo"].is_object(), "{init}");
@@ -123,7 +123,21 @@ async fn lists_exactly_twelve_tools_with_exact_names() {
     let tools = list["result"]["tools"].as_array().unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(names, Tools::NAMES);
+    assert_eq!(names.len(), 21);
     for t in tools {
+        let read_only = t["annotations"]["readOnlyHint"].as_bool();
+        let want = matches!(
+            t["name"].as_str().unwrap(),
+            "bamburino_capabilities"
+                | "studio_get_state"
+                | "studio_get_settings"
+                | "studio_list_models"
+                | "studio_slice_status"
+                | "studio_get_slice_summary"
+                | "catalog_search"
+                | "studio_list_filaments"
+        );
+        assert_eq!(read_only, Some(want), "{t}");
         assert_eq!(t["inputSchema"]["type"], "object", "{t}");
         assert!(!t["description"].as_str().unwrap().is_empty());
     }
@@ -552,10 +566,31 @@ async fn no_arg_tools_reject_arguments() {
 }
 
 #[tokio::test]
+async fn new_tools_dispatch_and_unknown_fields_are_rejected() {
+    let s = start().await;
+    let r = s.call("studio_assign_filament", json!({"nope": 1})).await;
+    assert_eq!(r["result"]["isError"], true, "{r}");
+    assert_eq!(
+        r["result"]["structuredContent"]["error"]["code"],
+        "INVALID_ARGUMENT"
+    );
+    let r = s.call("studio_list_filaments", json!({})).await;
+    assert_ne!(r["result"]["isError"], true, "{r}");
+    let project = r["result"]["structuredContent"]["project"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{r}"));
+    assert!(!project.is_empty(), "{r}");
+    assert_eq!(project[0]["slot"], 1, "{r}");
+    s.shutdown().await;
+}
+
+#[tokio::test]
 async fn input_schemas_match_the_args_types() {
     use bamburino_core::tools::{
-        GetSettingsArgs, JobArgs, SearchArgs, SetSettingsArgs, SliceArgs, SummaryArgs,
-        SupportsArgs, TransformArgs,
+        ArrangeArgs, AssignFilamentArgs, ExportPlateArgs, GetSettingsArgs, JobArgs,
+        ListFilamentsArgs, MoveToPlateArgs, PlateCreateArgs, PlateDeleteArgs, PlateRenameArgs,
+        SaveProjectArgs, SearchArgs, SetSettingsArgs, SliceArgs, SummaryArgs, SupportsArgs,
+        TransformArgs,
     };
     fn schema<T: schemars::JsonSchema>() -> Value {
         serde_json::to_value(schemars::schema_for!(T)).unwrap()
@@ -563,7 +598,7 @@ async fn input_schemas_match_the_args_types() {
     let s = start().await;
     let list = s.rpc(1, "tools/list", json!({})).await;
     let tools = list["result"]["tools"].as_array().unwrap();
-    let expected: [(&str, Option<Value>); 12] = [
+    let expected: [(&str, Option<Value>); 21] = [
         ("bamburino_capabilities", None),
         ("studio_get_state", None),
         ("studio_get_settings", Some(schema::<GetSettingsArgs>())),
@@ -576,6 +611,18 @@ async fn input_schemas_match_the_args_types() {
         ("studio_cancel_slice", Some(schema::<JobArgs>())),
         ("studio_get_slice_summary", Some(schema::<SummaryArgs>())),
         ("catalog_search", Some(schema::<SearchArgs>())),
+        ("studio_list_filaments", Some(schema::<ListFilamentsArgs>())),
+        (
+            "studio_assign_filament",
+            Some(schema::<AssignFilamentArgs>()),
+        ),
+        ("studio_plate_create", Some(schema::<PlateCreateArgs>())),
+        ("studio_plate_rename", Some(schema::<PlateRenameArgs>())),
+        ("studio_plate_delete", Some(schema::<PlateDeleteArgs>())),
+        ("studio_move_to_plate", Some(schema::<MoveToPlateArgs>())),
+        ("studio_arrange", Some(schema::<ArrangeArgs>())),
+        ("studio_save_project", Some(schema::<SaveProjectArgs>())),
+        ("studio_export_plate", Some(schema::<ExportPlateArgs>())),
     ];
     for (name, want) in expected {
         let t = tools.iter().find(|t| t["name"] == name).unwrap();

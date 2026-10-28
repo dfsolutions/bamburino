@@ -7,7 +7,17 @@ What Bamburino does not do, or does only within stated bounds. Status vocabulary
 - **Windows x64 only.** One Bambu Studio version at a time: `v02.08.04.57`, with the Bamburino driver patch.
 - **No printer actions.** No start of a print, no printer control, no sending to a printer. Not in this version, by design.
 - **Bamburino does not start Studio.** Studio must be open (the Bamburino build, with Preferences > Local MCP server on). With Studio closed, only `bamburino_capabilities` and `catalog_search` work.
-- **Not in the MVP:** support painting, lay-on-face, comparison of variants, filament presets, multi-plate workflows, import and export of files through a tool. The path-handling rules exist in the service, but no tool takes a path yet.
+- **Not in scope:** support painting, lay-on-face, comparison of variants, filament preset editing, opening or importing files. Plates, filament assignment per object, arrange, saving the project and exporting a sliced plate exist now (`studio_plate_*`, `studio_assign_filament`, `studio_arrange`, `studio_save_project`, `studio_export_plate`); they are `not run` against a live Studio, see [acceptance-plates.md](acceptance-plates.md).
+
+## Plates, filaments and files
+
+- **File tools work only inside `allowed_dirs`.** `studio_save_project` and `studio_export_plate` take an absolute path in an existing folder under one of the roots written in `config.toml` (listed by `bamburino_capabilities`). They never create folders and never overwrite unless `overwrite: true`. `config init` writes the roots for the account that runs it; `--install` run by a different admin writes that admin's Documents and Downloads folders.
+- **The service runs as LocalService and may not read the user's folder.** Studio writes the file as the user; the service then reads it back for `bytes` and `sha256`. When it cannot, the call still succeeds with `sha256: null` and `hash_unavailable_reason`. Whether the Downloads folder is readable in service mode is acceptance row P10.
+- **Arrange is project-wide.** `studio_arrange` selects the plate you name, but the driver arranges the whole project, so instances can move to other plates (`moved_between_plates`). The plate stays selected afterwards.
+- **One slice result at a time.** Studio holds the result of the selected plate only, so slice and export plate by plate (`NOT_SLICED` otherwise).
+- **Project colours rely on `filament_colour`.** The format Studio returns is recorded in acceptance row P2; a colour that cannot be parsed is `color_hex: null`.
+- **The AMS is optional.** Without a selected, online printer with an AMS, `studio_list_filaments` returns `ams: null` and a reason; the agent must ask which colours are loaded.
+- **Printing is out of scope.** The exported files are opened with Bambu Connect or official Bambu Studio; the patched Studio cannot print.
 
 ## Writes
 
@@ -40,7 +50,7 @@ See [architecture.md](architecture.md) for the model. The gaps:
 
 ## Verification
 
-Per-function status is in [verification.md](verification.md). A function that does not appear there as `verified` is `not run` or `manual`: as of 2026-10-28 none of the 12 tools has been run against a live Studio.
+Per-function status is in [verification.md](verification.md). A function that does not appear there as `verified` is `not run` or `manual`: as of 2026-10-28 none of the 21 tools has been run against a live Studio.
 
 <!-- verification:start -->
 **Functions**
@@ -59,6 +69,15 @@ Per-function status is in [verification.md](verification.md). A function that do
 | `studio_cancel_slice` | not run | none | - |
 | `studio_get_slice_summary` | not run | none | - |
 | `catalog_search` | not run | none | - |
+| `studio_list_filaments` | not run | none | - |
+| `studio_assign_filament` | not run | none | - |
+| `studio_plate_create` | not run | none | - |
+| `studio_plate_rename` | not run | none | - |
+| `studio_plate_delete` | not run | none | - |
+| `studio_move_to_plate` | not run | none | - |
+| `studio_arrange` | not run | none | - |
+| `studio_save_project` | not run | none | - |
+| `studio_export_plate` | not run | none | - |
 | Install as Windows service | not run | none | - |
 | Ctrl+Z reverts agent changes | manual | acceptance-mvp-service.md steps 4, 4b, 4c | - |
 | Busy while modal dialog is open | manual | acceptance-mvp-service.md step 10 | - |

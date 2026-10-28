@@ -18,40 +18,59 @@ fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 }
 
 #[test]
-fn driver_tool_allowlist_excludes_physical_and_global() {
-    let banned = [
-        "device_",
+fn allowlist_has_27_tools_and_only_read_only_device_list() {
+    assert_eq!(DriverTool::ALL.len(), 27);
+    let device: Vec<_> = DriverTool::ALL
+        .iter()
+        .map(|t| t.name())
+        .filter(|n| n.starts_with("device_"))
+        .collect();
+    assert_eq!(device, ["device_list"]);
+    assert!(!DriverTool::DeviceList.is_mutation() && !DriverTool::AmsInventory.is_mutation());
+    for banned in [
         "printer_",
         "calibration_",
         "account_",
-        "ams_",
-        "project_",
-        "export_",
         "history_",
         "preferences_",
-    ];
-    for tool in DriverTool::ALL {
-        let name = tool.name();
-        for prefix in banned {
-            // `export_gcode` is the one permitted export tool.
-            if name == "export_gcode" {
-                continue;
-            }
-            assert!(!name.starts_with(prefix), "{name} starts with {prefix}");
-        }
-        assert_ne!(name, "preset_select");
+        "ams_mapping",
+    ] {
+        assert!(
+            DriverTool::ALL
+                .iter()
+                .all(|t| !t.name().starts_with(banned)),
+            "{banned}"
+        );
     }
+    assert!(DriverTool::ALL.iter().all(|t| t.name() != "preset_select"));
 }
 
 #[test]
-fn export_gcode_is_the_only_export_tool_on_the_allowlist() {
+fn exports_are_gcode_and_sliced_3mf_and_project_save_is_the_only_project_tool() {
     let exports: Vec<_> = DriverTool::ALL
         .iter()
         .map(|t| t.name())
         .filter(|n| n.contains("export"))
         .collect();
-    assert_eq!(exports, ["export_gcode"]);
-    assert!(DriverTool::ExportGcode.is_mutation());
+    assert_eq!(exports, ["export_gcode", "export_sliced_3mf"]);
+    let project: Vec<_> = DriverTool::ALL
+        .iter()
+        .map(|t| t.name())
+        .filter(|n| n.starts_with("project_"))
+        .collect();
+    assert_eq!(project, ["project_save"]);
+    for t in [
+        DriverTool::ProjectSave,
+        DriverTool::ExportSliced3mf,
+        DriverTool::ArrangeStart,
+        DriverTool::PlateCreate,
+        DriverTool::PlateDelete,
+        DriverTool::PlateRename,
+        DriverTool::PlateMoveInstance,
+        DriverTool::FilamentAssign,
+    ] {
+        assert!(t.is_mutation(), "{}", t.name());
+    }
 }
 
 #[test]

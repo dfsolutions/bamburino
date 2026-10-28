@@ -4,8 +4,9 @@
 use std::time::Duration;
 
 use bamburino_core::driver::{
-    AbsoluteTransform, DriverClient, DriverError, HttpDriverClient, HttpDriverConfig, JobStatus,
-    SettingSource, SettingsTarget,
+    AbsoluteTransform, AmsTray, DeviceSummary, DriverClient, DriverError, DriverJobError,
+    ExportedPlate, HttpDriverClient, HttpDriverConfig, JobStatus, PlateContents, SettingSource,
+    SettingsTarget,
 };
 use serde_json::{Value, json};
 use wiremock::matchers::{body_partial_json, header, method, path};
@@ -838,4 +839,301 @@ async fn token_file_is_reread_when_it_changes() {
     std::fs::write(&file, "").unwrap();
     assert!(!client.token_configured());
     assert!(!format!("{client:?}").contains("tok-two"));
+}
+
+fn plate_state_json() -> Value {
+    json!({
+        "plates":[{"index":0,"name":"Plate 1","locked":false},{"index":1,"name":"Red","locked":false}],
+        "selectedIndex":0,"plateRevision":"r2"
+    })
+}
+
+async fn arguments_of(server: &MockServer, tool: &str) -> Vec<Value> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| serde_json::from_slice::<Value>(&r.body).unwrap())
+        .filter(|v| v["params"]["name"] == tool)
+        .map(|v| v["params"]["arguments"].clone())
+        .collect()
+}
+
+/// Mounts `tool` so it only answers when `params.arguments` contains `args`
+/// (an unmatched request fails the call with a 404).
+async fn mount_tool_with_args(server: &MockServer, tool: &str, args: Value, response: Value) {
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .and(body_partial_json(
+            json!({"method":"tools/call","params":{"name":tool,"arguments":args}}),
+        ))
+        .respond_with(tool_ok(response))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn plate_create_sends_empty_arguments_and_parses_plate_state() {
+    let server = MockServer::start().await;
+    mount_handshake(&server).await;
+    mount_tool_with_args(&server, "plate_create", json!({}), plate_state_json()).await;
+    let client = HttpDriverClient::new(config(&server)).unwrap();
+    let pl = client.plate_create().await.unwrap();
+    assert_eq!(pl.plates.len(), 2);
+    assert_eq!(pl.plate_revision, "r2");
+    assert_eq!(arguments_of(&server, "plate_create").await, [json!({})]);
+}
+
+#[tokio::test]
+async fn plate_rename_sends_camel_case() {
+    let server = MockServer::start().await;
+    mount_handshake(&server).await;
+    mount_tool_with_args(
+        &server,
+        "plate_rename",
+        json!({"plateIndex":1,"expectedPlateRevision":"r","name":"Red"}),
+        plate_state_json(),
+    )
+    .await;
+    let client = HttpDriverClient::new(config(&server)).unwrap();
+    let pl = client.plate_rename(1, "r", "Red").await.unwrap();
+    assert_eq!(pl.plates[1].name, "Red");
+}
+
+#[tokio::test]
+async fn plate_delete_sends_contents_and_target_and_parses_nested_result() {
+    let server = MockServer::start().await;
+    mount_handshake(&server).await;
+    let reply = json!({
+        "contents":"move","movedInstanceCount":3,"deletedObjectCount":0,"destinationPlateIndex":1,
+        "plates": plate_state_json(), "model":{"objects":[]}
+    });
+    mount_tool_with_args(
+        &server,
+        "plate_delete",
+        json!({"plateIndex":2,"expectedPlateRevision":"r","contents":"move","targetPlateIndex":2}),
+        reply,
+    )
+    .await;
+    mount_tool_with_args(
+        &server,
+        "plate_delete",
+        json!({"plateIndex":1,"expectedPlateRevision":"r","contents":"require_empty"}),
+        json!({
+            "contents":"require_empty","movedInstanceCount":0,"deletedObjectCount":0,
+            "plates": plate_state_json(), "model":{"objects":[]}
+        }),
+    )
+    .await;
+    let client = HttpDriverClient::new(config(&server)).unwrap();
+
+    let moved = client
+        .plate_delete(2, "r", PlateContents::Move, Some(2))
+        .await
+        .unwrap();
+    assert_eq!(moved.moved_instances, 3);
+    assert_eq!(moved.deleted_objects, 0);
+    assert_eq!(moved.destination_plate_index, Some(1));
+    assert_eq!(moved.plates.plate_revision, "r2");
+
+    let empty = client
+        .plate_delete(1, "r", PlateContents::RequireEmpty, None)
+        .await
+        .unwrap();
+    assert_eq!(empty.destination_plate_index, None);
+    let calls = arguments_of(&server, "plate_delete").await;
+    assert_eq!(calls[1]["contents"], "require_empty");
+    assert!(calls[1].get("targetPlateIndex").is_none(), "{}", calls[1]);
+
+    // Delete wire string.
+    assert_eq!(PlateContents::Delete.wire(), "delete");
+}
+
+#[tokio::test]
+async fn plate_move_instance_sends_ids_and_parses_nested_plates() {
+    let server = MockServer::start().await;
+    mount_handshake(&server).await;
+    mount_tool_with_args(
+        &server,
+        "plate_move_instance",
+        json!({"objectId":"o1","instanceId":"i1","plateIndex":1,"expectedPlateRevision":"r"}),
+        json!({"plates": plate_state_json(), "model":{"objects":[]}}),
+    )
+    .await;
+    let client = HttpDriverClient::new(config(&server)).unwrap();
+    let pl = client
+        .plate_move_instance("o1", "i1", 1, "r")
+        .await
+        .unwrap();
+    assert_eq!(pl.plate_revision, "r2");
+}
+
+#[tokio::test]
+async fn filament_assign_sends_zero_based_index_and_parses_preset() {
+    let server = MockServer::start().await;
+    mount_handshake(&server).await;
+    mount_tool_with_args(
+        &server,
+        "filament_assign",
+        json!({"objectId":"o1","filamentIndex":1}),
+        json!({"target":{"objectId":"o1"},"filamentIndex":1,"preset":"Bambu PLA Basic"}),
+    )
+    .await;
+    let client = HttpDriverClient::new(config(&server)).unwrap();
+    let a = client.filament_assign("o1", 1).await.unwrap();
+    assert_eq!(a.object_id, "o1");
+    assert_eq!(a.filament_index, 1);
+    assert_eq!(a.preset, "Bambu PLA Basic");
+}
+
+#[tokio::test]
+async fn arrange_start_parses_ui_job_with_string_error() {
+    let server = MockServer::start().await;
+    mount_handshake(&server).await;
+    mount_tool_with_args(
+        &server,
+        "arrange_start",
+        json!({}),
+        json!({"jobId":"s:7:arrange","kind":"arrange","plateIndex":0,"status":"failed","error":"Native UI job failed"}),
+    )
+    .await;
+    let client = HttpDriverClient::new(config(&server)).unwrap();
+    let j = client.arrange_start().await.unwrap();
+    assert_eq!(j.id, "s:7:arrange");
+    assert_eq!(j.status, JobStatus::Failed);
+    assert_eq!(
+        j.error,
+        Some(DriverJobError {
+            code: "NATIVE_ERROR".to_string(),
+            message: "Native UI job failed".to_string()
+        })
+    );
+}
+
+#[tokio::test]
+async fn device_list_parses_selected_online_connected() {
+    let server = MockServer::start().await;
+    mount_handshake(&server).await;
+    mount_tool_with_args(
+        &server,
+        "device_list",
+        json!({}),
+        json!({"pluginAvailable":true,"devices":[
+            {"deviceId":"d1","name":"X1C","selected":true,"online":true,"connected":false,
+             "model":"BL-P001","extra":{"a":1}}
+        ]}),
+    )
+    .await;
+    let client = HttpDriverClient::new(config(&server)).unwrap();
+    let d = client.device_list().await.unwrap();
+    assert_eq!(
+        d,
+        [DeviceSummary {
+            device_id: "d1".to_string(),
+            name: "X1C".to_string(),
+            selected: true,
+            online: true,
+            connected: false,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn ams_inventory_sends_device_id_and_parses_units_and_trays() {
+    let server = MockServer::start().await;
+    mount_handshake(&server).await;
+    mount_tool_with_args(
+        &server,
+        "ams_inventory",
+        json!({"deviceId":"d1"}),
+        json!({"deviceId":"d1","units":[{"amsId":"0","slots":[
+            {"slotId":"0","globalTrayId":0,"exists":true,"filamentType":"PLA","color":"00AE42FF","remainingPercent":80},
+            {"slotId":"1","exists":false,"filamentType":"","color":"00000000","remainingPercent":-1}
+        ]}],"slicedFilaments":[]}),
+    )
+    .await;
+    let client = HttpDriverClient::new(config(&server)).unwrap();
+    let inv = client.ams_inventory("d1").await.unwrap();
+    assert_eq!(inv.units.len(), 1);
+    assert_eq!(inv.units[0].ams_id, "0");
+    let t = &inv.units[0].trays;
+    assert_eq!(
+        t[0],
+        AmsTray {
+            slot_id: "0".to_string(),
+            exists: true,
+            filament_type: "PLA".to_string(),
+            color: "00AE42FF".to_string(),
+            remaining_percent: Some(80),
+        }
+    );
+    assert!(!t[1].exists);
+    assert_eq!(t[1].remaining_percent, Some(-1));
+}
+
+#[tokio::test]
+async fn project_save_sends_path_and_overwrite_flag() {
+    let server = MockServer::start().await;
+    mount_handshake(&server).await;
+    mount_tool_with_args(
+        &server,
+        "project_save",
+        json!({"path":"C:\\x\\a.3mf","overwrite":false}),
+        json!({"path":"C:\\x\\a.3mf"}),
+    )
+    .await;
+    mount_tool_with_args(
+        &server,
+        "project_save",
+        json!({"path":"C:\\x\\b.3mf","overwrite":true}),
+        json!({"path":"C:\\x\\b.3mf"}),
+    )
+    .await;
+    let client = HttpDriverClient::new(config(&server)).unwrap();
+    client
+        .project_save(std::path::Path::new("C:\\x\\a.3mf"), false)
+        .await
+        .unwrap();
+    client
+        .project_save(std::path::Path::new("C:\\x\\b.3mf"), true)
+        .await
+        .unwrap();
+    let calls = arguments_of(&server, "project_save").await;
+    assert_eq!(calls[0]["overwrite"], false);
+    assert_eq!(calls[1]["overwrite"], true);
+}
+
+#[tokio::test]
+async fn export_sliced_3mf_sends_all_fields_and_parses_bytes() {
+    let server = MockServer::start().await;
+    mount_handshake(&server).await;
+    mount_tool_with_args(
+        &server,
+        "export_sliced_3mf",
+        json!({"plateIndex":0,"expectedPlateRevision":"r","sliceResultId":"s",
+               "path":"C:\\x\\a.gcode.3mf","overwrite":false}),
+        json!({"sliceResultId":"s","plateIndex":0,"path":"C:\\x\\a.gcode.3mf","bytes":12345}),
+    )
+    .await;
+    let client = HttpDriverClient::new(config(&server)).unwrap();
+    let e = client
+        .export_sliced_3mf(
+            0,
+            "r",
+            "s",
+            std::path::Path::new("C:\\x\\a.gcode.3mf"),
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        e,
+        ExportedPlate {
+            slice_result_id: "s".to_string(),
+            plate_index: 0,
+            path: "C:\\x\\a.gcode.3mf".to_string(),
+            bytes: 12345,
+        }
+    );
 }

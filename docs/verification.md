@@ -19,6 +19,15 @@ Vocabulary: `verified | failed | not run | manual`. A row is `verified` only whe
 | `studio_cancel_slice` | not run | none | - |
 | `studio_get_slice_summary` | not run | none | - |
 | `catalog_search` | not run | none | - |
+| `studio_list_filaments` | not run | none | - |
+| `studio_assign_filament` | not run | none | - |
+| `studio_plate_create` | not run | none | - |
+| `studio_plate_rename` | not run | none | - |
+| `studio_plate_delete` | not run | none | - |
+| `studio_move_to_plate` | not run | none | - |
+| `studio_arrange` | not run | none | - |
+| `studio_save_project` | not run | none | - |
+| `studio_export_plate` | not run | none | - |
 | Install as Windows service | not run | none | - |
 | Ctrl+Z reverts agent changes | manual | acceptance-mvp-service.md steps 4, 4b, 4c | - |
 | Busy while modal dialog is open | manual | acceptance-mvp-service.md step 10 | - |

@@ -30,7 +30,7 @@ use serde_json::{Value, json};
 use super::args::{JobArgs, SliceArgs, SummaryArgs};
 use super::mutate::{busy_reason, read_error, write_error};
 use super::{Tools, driver_error};
-use crate::driver::{DriverError, DriverJob, JobStatus};
+use crate::driver::{DriverClient, DriverError, DriverJob, JobStatus};
 use crate::errors::{ToolError, ToolErrorCode};
 
 const STALE_MESSAGE: &str =
@@ -63,7 +63,7 @@ fn job_error(e: DriverError, job_id: &str) -> ToolError {
     }
 }
 
-fn status_name(s: &JobStatus) -> &'static str {
+pub(super) fn status_name(s: &JobStatus) -> &'static str {
     match s {
         // Cancellation is requested but not finished: still running.
         JobStatus::Running | JobStatus::Cancelling => "running",
@@ -128,7 +128,8 @@ pub(crate) struct HeaderUsage {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FilamentRow {
-    /// 0-based filament slot (Studio shows `index + 1`).
+    /// 0-based filament index (the tool output also carries `slot` = `index + 1`, the
+    /// 1-based slot Bamburino uses everywhere else).
     pub index: u32,
     pub grams: Option<f64>,
     pub meters: Option<f64>,
@@ -302,6 +303,25 @@ fn scan_header(path: &Path) -> std::io::Result<HeaderUsage> {
     Ok(usage)
 }
 
+/// Polls `job_get` until the job is terminal or `timeout` has passed and
+/// returns the last job seen. A timeout is not an error: the caller sees a
+/// non-terminal status. The wait can overshoot `timeout` by up to one `poll`
+/// interval. With a zero timeout the job is returned unpolled.
+pub(crate) async fn wait_job(
+    drv: &dyn DriverClient,
+    first: DriverJob,
+    poll: Duration,
+    timeout: Duration,
+) -> Result<DriverJob, DriverError> {
+    let started = std::time::Instant::now();
+    let mut job = first;
+    while !job.status.is_terminal() && started.elapsed() < timeout {
+        tokio::time::sleep(poll).await;
+        job = drv.job_get(&job.id).await?;
+    }
+    Ok(job)
+}
+
 impl Tools {
     /// Starts slicing a plate (default: the selected one). Returns the job.
     pub async fn studio_slice(&self, a: SliceArgs) -> Result<Value, ToolError> {
@@ -405,7 +425,8 @@ impl Tools {
             .unwrap_or(job.plate_index)
     }
 
-    /// One poll of a slice job. Every `export_gcode` (see the summary) creates a
+    /// One poll of a slice or arrange job (`studio_arrange` job ids work too).
+    /// Every `export_gcode` (see the summary) creates a
     /// driver job too and the driver keeps only the last 64 jobs, so an old slice
     /// job may become `JOB_NOT_FOUND` after many summaries.
     pub async fn studio_slice_status(&self, a: JobArgs) -> Result<Value, ToolError> {
@@ -421,8 +442,9 @@ impl Tools {
         Ok(job_json(&job, self.plate_of_job(&job)))
     }
 
-    /// Asks the driver to cancel a job. The driver treats this as a read, so
-    /// it works while a dialog is open.
+    /// Asks the driver to cancel a job (slice or arrange; `studio_arrange` job
+    /// ids work too). The driver treats this as a read, so it works while a
+    /// dialog is open.
     pub async fn studio_cancel_slice(&self, a: JobArgs) -> Result<Value, ToolError> {
         self.revision.touch_client();
         self.probe
@@ -495,6 +517,7 @@ impl Tools {
             .map(|r| {
                 json!({
                     "index": r.index,
+                    "slot": r.index + 1,
                     "grams": r.grams,
                     "meters": r.meters.map(round4),
                     "volume_cm3": r.volume_cm3,

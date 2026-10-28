@@ -19,7 +19,7 @@ Bamburino has two pieces: the **driver** (a patched Bambu Studio, C++, runs insi
 
 - One executable, Rust, no external runtime. Runs as the service `Bamburino` under `NT AUTHORITY\LocalService`, or in the foreground with `--run`.
 - Endpoint: Streamable HTTP at `/mcp` on `127.0.0.1:<listen_port>` (default 27600), plus `/healthz`. Every request passes a Host/Origin check and a constant-time bearer check.
-- Exposes 12 tools and the catalog resource `bamburino://catalog`.
+- Exposes 21 tools and the catalog resource `bamburino://catalog`.
 - Configuration: `%ProgramData%\Bamburino\config.toml`, the client token and the driver token in the same folder (ACL-protected), logs in `logs\`, temporary files in `tmp\`.
 
 ### Catalog and validation
@@ -41,6 +41,13 @@ The catalog describes more than the driver can write. The driver accepts only a 
 | plate selection | `plate_select` |
 | slice | `slice_start`, `slice_get_state`, `job_get`, `job_cancel` |
 | summary | `slice_get_state` (estimated time), `preview_get_summary` (move counts, warnings), `export_gcode` to a temporary file whose header gives grams, meters and volume |
+| filament list | `preset_list` (filament), `settings_effective` (`filament_colour`, `filament_type`), `device_list` and `ams_inventory` (optional) |
+| assign filament | `filament_assign` (0-based index; Bamburino slots are 1-based), read back with `settings_effective` |
+| plate create / rename / delete | `plate_rename`, `plate_delete` (with `expectedPlateRevision` from a fresh `plate_list`); `plate_create` takes none |
+| move to plate | `plate_move_instance` |
+| arrange | `plate_select` (when needed), `arrange_start`, then `job_get` until the job ends; `model_list` before and after for the move report |
+| save project | `project_save` |
+| export plate | `slice_get_state` (the plate must be the selected one with a current result), `export_sliced_3mf` |
 
 The full table with arguments is in the module documentation of `service/crates/bamburino-core/src/driver/map.rs`.
 
@@ -56,7 +63,7 @@ Goal: never overwrite what you just did by hand.
 
 ### Mutation pipeline
 
-Every mutating tool (`studio_set_settings`, `studio_transform_model`, `studio_set_supports`) runs under one mutex, in this order:
+Every mutating tool (`studio_set_settings`, `studio_transform_model`, `studio_set_supports`, `studio_assign_filament`, `studio_plate_create`, `studio_plate_rename`, `studio_plate_delete`, `studio_move_to_plate`, `studio_arrange`) runs under one mutex, in this order (`studio_save_project` and `studio_export_plate` take the same mutex and the readiness and busy checks of steps 1 and 2, but no `expected_revision`; they refresh the revision after the write):
 
 1. Studio is ready, and for writes it is the pinned build (else `VERSION_MISMATCH`).
 2. No modal dialog, UI job or slice is running (else `BUSY`, with no write attempted).

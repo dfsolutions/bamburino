@@ -8,8 +8,9 @@ use std::time::Duration;
 use bamburino_core::detect::FixedProcessProbe;
 use bamburino_core::driver::mock::MockDriver;
 use bamburino_core::driver::{
-    AbsoluteTransform, ActivePresets, AppState, DriverCapabilities, DriverClient, DriverError,
-    DriverJob, EffectiveSetting, ModelObject, PlateList, SettingsTarget, SliceState, SliceSummary,
+    AbsoluteTransform, ActivePresets, AmsInventory, AppState, DeviceSummary, DriverCapabilities,
+    DriverClient, DriverError, DriverJob, EffectiveSetting, ExportedPlate, FilamentAssignment,
+    ModelObject, PlateContents, PlateDeleted, PlateList, SettingsTarget, SliceState, SliceSummary,
 };
 use bamburino_core::errors::ToolErrorCode;
 use bamburino_core::tools::{Change, SetSettingsArgs, TargetRef, ToolConfig, Tools};
@@ -617,6 +618,55 @@ impl DriverClient for Flaky {
         path: &std::path::Path,
     ) -> Result<DriverJob, DriverError> {
         self.inner.export_gcode(p, r, s, path).await
+    }
+    async fn plate_create(&self) -> Result<PlateList, DriverError> {
+        self.inner.plate_create().await
+    }
+    async fn plate_rename(&self, i: u32, r: &str, n: &str) -> Result<PlateList, DriverError> {
+        self.inner.plate_rename(i, r, n).await
+    }
+    async fn plate_delete(
+        &self,
+        i: u32,
+        r: &str,
+        c: PlateContents,
+        t: Option<u32>,
+    ) -> Result<PlateDeleted, DriverError> {
+        self.inner.plate_delete(i, r, c, t).await
+    }
+    async fn plate_move_instance(
+        &self,
+        o: &str,
+        n: &str,
+        i: u32,
+        r: &str,
+    ) -> Result<PlateList, DriverError> {
+        self.inner.plate_move_instance(o, n, i, r).await
+    }
+    async fn filament_assign(&self, o: &str, i: u32) -> Result<FilamentAssignment, DriverError> {
+        self.inner.filament_assign(o, i).await
+    }
+    async fn arrange_start(&self) -> Result<DriverJob, DriverError> {
+        self.inner.arrange_start().await
+    }
+    async fn device_list(&self) -> Result<Vec<DeviceSummary>, DriverError> {
+        self.inner.device_list().await
+    }
+    async fn ams_inventory(&self, d: &str) -> Result<AmsInventory, DriverError> {
+        self.inner.ams_inventory(d).await
+    }
+    async fn project_save(&self, p: &std::path::Path, o: bool) -> Result<(), DriverError> {
+        self.inner.project_save(p, o).await
+    }
+    async fn export_sliced_3mf(
+        &self,
+        i: u32,
+        r: &str,
+        s: &str,
+        p: &std::path::Path,
+        o: bool,
+    ) -> Result<ExportedPlate, DriverError> {
+        self.inner.export_sliced_3mf(i, r, s, p, o).await
     }
 }
 

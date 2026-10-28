@@ -300,3 +300,218 @@ fn onedrive_documents_root_is_accepted() {
         None => eprintln!("no plain file in Documents: root acceptance only"),
     }
 }
+
+#[test]
+fn destination_accepts_new_files_in_the_root_and_in_subdirs() {
+    let t = tree();
+    for (input, want) in [
+        (t.docs.join("new.gcode.3mf"), t.docs.join("new.gcode.3mf")),
+        (
+            t.docs.join("sub").join("new.3mf"),
+            t.docs.join("sub").join("new.3mf"),
+        ),
+    ] {
+        let got = t
+            .guard
+            .check_destination(&s(&input))
+            .unwrap_or_else(|e| panic!("{input:?}: {e:?}"));
+        assert_eq!(got, want);
+        assert!(!got.exists());
+    }
+    // An existing plain file is acceptable too (overwrite is the tool's call).
+    assert_eq!(
+        t.guard.check_destination(&s(&t.docs.join("a.stl"))),
+        Ok(t.docs.join("a.stl"))
+    );
+    // Forward slashes and the long-path prefix are normalized.
+    let fwd = format!("{}/sub/x.3mf", s(&t.docs));
+    assert_eq!(
+        t.guard.check_destination(&fwd),
+        Ok(t.docs.join("sub").join("x.3mf"))
+    );
+    let long = format!(r"\\?\{}\x.3mf", s(&t.docs));
+    assert_eq!(t.guard.check_destination(&long), Ok(t.docs.join("x.3mf")));
+}
+
+#[test]
+fn destination_rejects() {
+    let t = tree();
+    let d = s(&t.docs);
+    let base = s(&t.base);
+    let cases: Vec<(String, PathError)> = vec![
+        (format!(r"{d}\missing\new.3mf"), PathError::NotFound),
+        (format!(r"{d}\a.stl\new.3mf"), PathError::NotFound), // parent is a file
+        (format!(r"{base}\outside\new.3mf"), PathError::OutsideRoots),
+        (d.clone(), PathError::OutsideRoots), // the root itself
+        (format!(r"{d}\"), PathError::OutsideRoots),
+        (format!(r"{d}\..\x.3mf"), PathError::Traversal),
+        (format!(r"{d}\CON.3mf"), PathError::ReservedName),
+        (format!(r"{d}\a.3mf."), PathError::TrailingDotOrSpace),
+        (format!(r"{d}\a.3mf "), PathError::TrailingDotOrSpace),
+        (format!(r"{d}\a.3mf:s"), PathError::AlternateDataStream),
+        (r"new.3mf".into(), PathError::Relative),
+        (r"sub\new.3mf".into(), PathError::Relative),
+        (r"\\srv\s\a.3mf".into(), PathError::Unc),
+        (r"\\.\C:\a.3mf".into(), PathError::DevicePath),
+    ];
+    for (input, want) in cases {
+        assert_eq!(t.guard.check_destination(&input), Err(want), "{input:?}");
+    }
+    // No root: everything is outside.
+    let (empty, _) = PathGuard::new(vec![]);
+    assert_eq!(
+        empty.check_destination(&s(&t.docs.join("new.3mf"))),
+        Err(PathError::OutsideRoots)
+    );
+}
+
+#[test]
+fn destination_rejects_an_existing_symlink_target() {
+    let t = tree();
+    let link = t.docs.join("sym.3mf");
+    if std::os::windows::fs::symlink_file(t.base.join("outside").join("secret.stl"), &link).is_err()
+    {
+        eprintln!("SKIPPED: symlink creation needs privilege or Developer Mode");
+        return;
+    }
+    assert_eq!(
+        t.guard.check_destination(&s(&link)),
+        Err(PathError::ReparsePoint)
+    );
+}
+
+#[test]
+fn destination_under_a_junction_is_rejected() {
+    let t = tree();
+    let link = t.docs.join("link");
+    if !make_junction(&link, &t.base.join("outside")) {
+        eprintln!("SKIPPED: cannot create a junction here");
+        return;
+    }
+    assert_eq!(
+        t.guard.check_destination(&s(&link.join("new.3mf"))),
+        Err(PathError::ReparsePoint)
+    );
+    // A junction as the target itself.
+    assert_eq!(
+        t.guard.check_destination(&s(&link)),
+        Err(PathError::ReparsePoint)
+    );
+}
+
+/// Denies the current user listing and reading `dir` (inherited by its
+/// children). Returns false when `icacls` is unavailable.
+fn deny_listing(dir: &Path) -> bool {
+    let user = std::env::var("USERNAME").unwrap_or_default();
+    std::process::Command::new("icacls")
+        .arg(dir)
+        .args(["/deny", &format!("{user}:(OI)(CI)(RD,RA,REA,X)")])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn undo_deny(dir: &Path) {
+    let user = std::env::var("USERNAME").unwrap_or_default();
+    let _ = std::process::Command::new("icacls")
+        .arg(dir)
+        .args(["/remove:d", &user])
+        .output();
+}
+
+#[test]
+fn destination_in_a_directory_this_account_cannot_inspect_is_left_to_the_driver() {
+    let t = tree();
+    let locked = t.docs.join("locked");
+    std::fs::create_dir_all(locked.join("sub")).unwrap();
+    if !deny_listing(&locked) {
+        eprintln!("SKIPPED: cannot set a deny ACE here");
+        return;
+    }
+    let probe = std::fs::symlink_metadata(locked.join("sub"));
+    let denied = matches!(&probe, Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied);
+    let target = locked.join("sub").join("new.3mf");
+    let got = t.guard.check_destination(&s(&target));
+    // Lexical rules are still enforced below the uninspectable directory.
+    let bad = t
+        .guard
+        .check_destination(&format!(r"{}\CON.3mf", s(&locked.join("sub"))));
+    let roots = PathGuard::new(vec![locked.join("sub")]);
+    undo_deny(&locked);
+    if !denied {
+        eprintln!("SKIPPED: the deny ACE did not make the directory uninspectable ({probe:?})");
+        return;
+    }
+    assert_eq!(got, Ok(target));
+    assert_eq!(bad, Err(PathError::ReservedName));
+    // A root that cannot be inspected is kept, flagged as unverified.
+    let (guard, excluded) = roots;
+    assert!(excluded.is_empty(), "{excluded:?}");
+    assert_eq!(guard.unverified_roots(), &[locked.join("sub")]);
+    assert_eq!(guard.roots(), &[locked.join("sub")]);
+}
+
+#[test]
+fn inspectable_roots_are_verified() {
+    let t = tree();
+    assert!(t.guard.unverified_roots().is_empty());
+}
+
+/// Root names match exactly except for ASCII letter case. Unicode case
+/// mapping would equate names NTFS keeps apart (`Glaßes`/`Glasses`,
+/// `Fıddle`/`Fiddle`, `ſass`/`Sass`, `µ`/`μ`, `ς`/`σ`): every such sibling is
+/// outside the root. The cost: a non-ASCII case difference is rejected too.
+#[test]
+fn root_containment_folds_ascii_case_only() {
+    let t = tree();
+    // (root, sibling NTFS keeps apart)
+    let pairs = [
+        ("Glasses", "Gla\u{df}es"),   // ß -> SS
+        ("Fiddle", "F\u{131}ddle"),   // dotless ı -> I
+        ("Sass", "\u{17f}ass"),       // long ſ -> S
+        ("\u{3bc}m", "\u{b5}m"),      // Greek μ vs micro sign µ
+        ("Ba\u{3c3}e", "Ba\u{3c2}e"), // σ vs final ς
+    ];
+    for (root_name, sibling_name) in pairs {
+        let root = t.base.join(root_name);
+        let sibling = t.base.join(sibling_name);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        let (guard, excluded) = PathGuard::new(vec![root.clone()]);
+        assert!(excluded.is_empty(), "{excluded:?}");
+        assert_eq!(
+            guard.check_destination(&s(&sibling.join("x.3mf"))),
+            Err(PathError::OutsideRoots),
+            "{sibling_name} must not match root {root_name}"
+        );
+        assert!(guard.check_destination(&s(&root.join("x.3mf"))).is_ok());
+    }
+    let glasses = t.base.join("Gla\u{df}es");
+    std::fs::write(glasses.join("x.stl"), b"x").unwrap();
+    let (guard, _) = PathGuard::new(vec![t.base.join("Glasses")]);
+    assert_eq!(
+        guard.check(&s(&glasses.join("x.stl"))),
+        Err(PathError::OutsideRoots)
+    );
+
+    // A plain ASCII case-only difference is still the same directory.
+    let upper = t.base.join("GLASSES").join("x.3mf");
+    assert_eq!(guard.check_destination(&s(&upper)), Ok(upper.clone()));
+    let lower = t.base.join("glasses").join("x.3mf");
+    assert_eq!(guard.check_destination(&s(&lower)), Ok(lower));
+    // A non-ASCII case difference is rejected (false rejection by design):
+    // the path must spell `à` as config.toml does.
+    let accented = t.base.join("Citt\u{e0}");
+    std::fs::create_dir_all(&accented).unwrap();
+    let (g2, _) = PathGuard::new(vec![accented.clone()]);
+    let caps = t.base.join("CITT\u{c0}").join("x.3mf");
+    assert_eq!(
+        g2.check_destination(&s(&caps)),
+        Err(PathError::OutsideRoots)
+    );
+    let exact = accented.join("x.3mf");
+    assert_eq!(g2.check_destination(&s(&exact)), Ok(exact.clone()));
+    // ASCII case may still differ around the non-ASCII letter.
+    let mixed = t.base.join("cITT\u{e0}").join("x.3mf");
+    assert_eq!(g2.check_destination(&s(&mixed)), Ok(mixed.clone()));
+}

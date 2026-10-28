@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The MCP server: Streamable HTTP on loopback (rmcp + axum), bearer
-//! authentication, Host/Origin checks, the 12 tools and the catalog resource.
+//! authentication, Host/Origin checks, the 21 tools and the catalog resource.
 //!
 //! Public API: [`serve`] (binds `127.0.0.1:<listen_port>`), [`serve_on`]
 //! (an already bound loopback listener, for tests) and [`router`].
@@ -22,8 +22,9 @@ use axum::routing::get;
 use bamburino_core::catalog::Catalog;
 use bamburino_core::errors::{ToolError, ToolErrorCode};
 use bamburino_core::tools::{
-    GetSettingsArgs, JobArgs, SearchArgs, SetSettingsArgs, SliceArgs, SummaryArgs, SupportsArgs,
-    Tools, TransformArgs,
+    ArrangeArgs, AssignFilamentArgs, ExportPlateArgs, GetSettingsArgs, JobArgs, ListFilamentsArgs,
+    MoveToPlateArgs, PlateCreateArgs, PlateDeleteArgs, PlateRenameArgs, SaveProjectArgs,
+    SearchArgs, SetSettingsArgs, SliceArgs, SummaryArgs, SupportsArgs, Tools, TransformArgs,
 };
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, Implementation, ListResourcesResult,
@@ -130,12 +131,12 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool_def::<JobArgs>(
             "studio_slice_status",
-            "Reads the progress of a slice job started with studio_slice.",
+            "Reads the progress of a slice or arrange job (ids from studio_slice or studio_arrange).",
             true,
         ),
         tool_def::<JobArgs>(
             "studio_cancel_slice",
-            "Cancels a running slice job started with studio_slice.",
+            "Cancels a running slice or arrange job (ids from studio_slice or studio_arrange).",
             false,
         ),
         tool_def::<SummaryArgs>(
@@ -147,6 +148,51 @@ fn tool_defs() -> Vec<Tool> {
             "catalog_search",
             "Reads the settings catalog: finds setting keys by words of key, label or description.",
             true,
+        ),
+        tool_def::<ListFilamentsArgs>(
+            "studio_list_filaments",
+            "Reads the project filament slots (1-based, with colour and material) and, when a printer with an AMS is reachable, the AMS trays; a missing AMS is reported as `ams: null` with a reason, never an error. An explicit `device_id` skips the offline check: an unreachable printer then gives `ams_read_failed`, not `printer_offline`.",
+            true,
+        ),
+        tool_def::<AssignFilamentArgs>(
+            "studio_assign_filament",
+            "Assigns a project filament slot (1-based) to an object; requires `expected_revision` from studio_get_state and refuses locked plates.",
+            false,
+        ),
+        tool_def::<PlateCreateArgs>(
+            "studio_plate_create",
+            "Adds a plate, optionally named; requires `expected_revision` from studio_get_state.",
+            false,
+        ),
+        tool_def::<PlateRenameArgs>(
+            "studio_plate_rename",
+            "Renames a plate (0-based `plate_index`); requires `expected_revision` from studio_get_state.",
+            false,
+        ),
+        tool_def::<PlateDeleteArgs>(
+            "studio_plate_delete",
+            "Deletes a plate; a non-empty plate needs explicit `contents` (move or delete) and later plates are renumbered; requires `expected_revision` from studio_get_state.",
+            false,
+        ),
+        tool_def::<MoveToPlateArgs>(
+            "studio_move_to_plate",
+            "Moves an object instance to another plate (0-based); requires `expected_revision` from studio_get_state.",
+            false,
+        ),
+        tool_def::<ArrangeArgs>(
+            "studio_arrange",
+            "Selects `plate_index`, then waits for Studio to arrange the whole project (objects may move between plates) and reports the moves; requires `expected_revision` from studio_get_state; poll a still-running job with studio_slice_status.",
+            false,
+        ),
+        tool_def::<SaveProjectArgs>(
+            "studio_save_project",
+            "Saves the project as .3mf at an absolute path inside `allowed_dirs`; never overwrites unless `overwrite: true`; returns bytes and sha256.",
+            false,
+        ),
+        tool_def::<ExportPlateArgs>(
+            "studio_export_plate",
+            "Exports the sliced plate as .gcode.3mf at an absolute path inside `allowed_dirs`; the plate must be freshly sliced; never overwrites unless `overwrite: true`; returns bytes and sha256.",
+            false,
         ),
     ];
     debug_assert!(
@@ -215,6 +261,42 @@ async fn dispatch(tools: &Tools, name: &str, args: Value) -> Option<Result<Value
         },
         "catalog_search" => match parse(args) {
             Ok(a) => Ok(tools.catalog_search(a).await),
+            Err(e) => Err(e),
+        },
+        "studio_list_filaments" => match parse(args) {
+            Ok(a) => tools.studio_list_filaments(a).await,
+            Err(e) => Err(e),
+        },
+        "studio_assign_filament" => match parse(args) {
+            Ok(a) => tools.studio_assign_filament(a).await,
+            Err(e) => Err(e),
+        },
+        "studio_plate_create" => match parse(args) {
+            Ok(a) => tools.studio_plate_create(a).await,
+            Err(e) => Err(e),
+        },
+        "studio_plate_rename" => match parse(args) {
+            Ok(a) => tools.studio_plate_rename(a).await,
+            Err(e) => Err(e),
+        },
+        "studio_plate_delete" => match parse(args) {
+            Ok(a) => tools.studio_plate_delete(a).await,
+            Err(e) => Err(e),
+        },
+        "studio_move_to_plate" => match parse(args) {
+            Ok(a) => tools.studio_move_to_plate(a).await,
+            Err(e) => Err(e),
+        },
+        "studio_arrange" => match parse(args) {
+            Ok(a) => tools.studio_arrange(a).await,
+            Err(e) => Err(e),
+        },
+        "studio_save_project" => match parse(args) {
+            Ok(a) => tools.studio_save_project(a).await,
+            Err(e) => Err(e),
+        },
+        "studio_export_plate" => match parse(args) {
+            Ok(a) => tools.studio_export_plate(a).await,
             Err(e) => Err(e),
         },
         _ => return None,

@@ -38,6 +38,101 @@ fn empty_file_loads_defaults() {
     assert_eq!(c.listen_port, 27600);
 }
 
+/// The service may run as LocalService: loading the file must never resolve
+/// Known Folders (they would be the service account's, not the owner's).
+#[test]
+fn loading_never_resolves_allowed_dirs() {
+    assert!(Config::default().allowed_dirs.is_empty());
+    assert!(load_str("").unwrap().allowed_dirs.is_empty());
+    let c = load_str("allowed_dirs = ['D:\\Prints']\n").unwrap();
+    assert_eq!(c.allowed_dirs, vec![std::path::PathBuf::from(r"D:\Prints")]);
+}
+
+/// The `config init` migration: an existing file without `allowed_dirs` gets
+/// the key appended, everything else byte for byte; idempotent; an explicit
+/// empty list is respected.
+#[test]
+fn init_migration_adds_a_missing_allowed_dirs_key_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = ConfigDir(tmp.path().to_path_buf());
+    let original = "# hand-written\nlisten_port = 28000\nlog_retention_days = 3";
+    std::fs::write(dir.config_file(), original).unwrap();
+    let dirs = vec![
+        std::path::PathBuf::from(r"C:\Users\owner\Documents"),
+        std::path::PathBuf::from(r"C:\Users\owner\Downloads"),
+    ];
+
+    assert!(dir.add_missing_allowed_dirs(&dirs).unwrap());
+    let after = std::fs::read_to_string(dir.config_file()).unwrap();
+    assert!(after.starts_with(original), "{after}");
+    let c = Config::load(&dir).unwrap();
+    assert_eq!(c.allowed_dirs, dirs);
+    assert_eq!(c.listen_port, 28000);
+    assert_eq!(c.log_retention_days, 3);
+
+    // Second run: nothing changes.
+    assert!(!dir.add_missing_allowed_dirs(&dirs).unwrap());
+    assert_eq!(std::fs::read_to_string(dir.config_file()).unwrap(), after);
+
+    // Known Folders resolved to nothing: the key stays absent so a later init retries.
+    let no_key = "listen_port = 28002
+";
+    std::fs::write(dir.config_file(), no_key).unwrap();
+    assert!(!dir.add_missing_allowed_dirs(&[]).unwrap());
+    assert_eq!(std::fs::read_to_string(dir.config_file()).unwrap(), no_key);
+    assert!(dir.add_missing_allowed_dirs(&dirs).unwrap());
+
+    // An explicit empty list is the owner's choice: left alone.
+    let explicit = "allowed_dirs = []\nlisten_port = 28001\n";
+    std::fs::write(dir.config_file(), explicit).unwrap();
+    assert!(!dir.add_missing_allowed_dirs(&dirs).unwrap());
+    assert_eq!(
+        std::fs::read_to_string(dir.config_file()).unwrap(),
+        explicit
+    );
+    assert!(Config::load(&dir).unwrap().allowed_dirs.is_empty());
+}
+
+/// The migration writes in place: the protected DACL of config.toml stays.
+#[cfg(windows)]
+#[test]
+fn init_migration_preserves_the_file_acl() {
+    use bamburino::acl::OwnerAccess;
+    use bamburino::secure::{create_restricted_file, security_sddl};
+    use std::io::Write;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = ConfigDir(tmp.path().to_path_buf());
+    // Modify for the owner so a non-elevated test can append.
+    let mut f = create_restricted_file(&dir.config_file(), &sid(), OwnerAccess::Modify).unwrap();
+    f.write_all(b"listen_port = 28002\n").unwrap();
+    drop(f);
+    let before = security_sddl(&dir.config_file()).unwrap();
+    assert!(before.contains("D:P"), "{before}");
+    assert!(
+        dir.add_missing_allowed_dirs(&[std::path::PathBuf::from(r"C:\x")])
+            .unwrap()
+    );
+    assert_eq!(security_sddl(&dir.config_file()).unwrap(), before);
+    assert_eq!(Config::load(&dir).unwrap().listen_port, 28002);
+}
+
+/// `config init` (run as the owner) writes the owner's Documents and
+/// Downloads into the file; that stored list is what the service uses.
+#[test]
+fn defaults_for_the_current_user_name_documents_and_downloads() {
+    let c = Config::defaults_for_current_user();
+    assert_eq!(c.allowed_dirs.len(), 2, "{:?}", c.allowed_dirs);
+    assert!(c.allowed_dirs.iter().all(|d| d.is_absolute()));
+    assert_eq!(
+        c.allowed_dirs,
+        bamburino::config::default_allowed_dirs(),
+        "same list as the Known Folder lookup"
+    );
+    // Round trip through the file keeps them.
+    let back = load_str(&c.to_toml()).unwrap();
+    assert_eq!(back.allowed_dirs, c.allowed_dirs);
+}
+
 #[test]
 fn missing_file_is_an_error() {
     let tmp = tempfile::tempdir().unwrap();
