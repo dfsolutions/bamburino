@@ -23,6 +23,12 @@ so they run on the maintainer's PC instead of GitHub-hosted runners.
 
 The work dir is also stored as an absolute path in `D:\GoogleAI\BAMBU-MCP\build\runner\.runner` (`workFolder`, backslashes doubled in the JSON). If the build folder is ever moved or renamed, repeat the step: stop the runner, move the folder, edit `workFolder` in `.runner` to the new path (keep the JSON valid; the file is hidden, clear the attribute before saving), then start it. The folder was renamed from `D:\bb` to `D:\BambuBuild` and then moved into the repo as `<repo>\build` (git-ignored) on 2026-10-28.
 
+After moving the build root, the CMake cache (`build\BambuStudio\build\CMakeCache.txt`) and the dependency
+config and pkg-config files under `build\deps-out` still contain the old absolute path. On 2026-10-28 the first
+two `build-studio` attempts after the move failed, with a CMake configure failure and a link failure on
+`freetype.lib`, both caused by the stale path. The fix is to delete the CMake cache and rewrite the old path in
+those files, or to delete `deps-out` and rebuild the dependencies with `pwsh driver/build.ps1 -Step deps`.
+
 The runner checks out the repository into `build\runner\_work\bamburino\bamburino`, i.e. a second clone nested inside the working clone. This is fine because `build/` is git-ignored, so the outer clone never sees the inner one.
 
 ## Register, start, stop, remove

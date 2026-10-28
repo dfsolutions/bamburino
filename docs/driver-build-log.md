@@ -165,3 +165,7 @@ Outcome: PR12485-OK (3 rounds + 1 test-program round)
   are refused while a build runs (`cmake.exe`, or an `MSBuild.exe` that is not an idle `/nodemode:` worker): exit 1
   with `-Integration`, SKIP otherwise.
 - `BAMBURINO_MSBUILD_JOBS` (default 8, 1..64) caps `-m:<n>` and `/p:CL_MPCount=<n>` on every msbuild call (`Get-MsBuildJobArgs`): unbounded `-m` on 20 threads started up to 20 `cl.exe` of 1-2 GB each, and with the PC in use (Teams call, VS Code, browser) memory pressure killed the build; the self-hosted CI job died twice on 2026-10-28 at about 13 min with no compile error.
+
+## 2026-10-28 - Release v0.1.0-rc3, build-studio attempts
+
+- Attempts 1-2 of `build-studio` failed after the build root moved from `D:\bb` to `<repo>\build`: stale `D:\bb` paths in `build\BambuStudio\build\CMakeCache.txt` (cmake configure) and in the `build\deps-out` cmake/pkg-config files (LNK1181 `freetype.lib`); fixed by deleting the cache and rewriting the paths, attempt 3 (full rebuild) OK. No repo code changed.
