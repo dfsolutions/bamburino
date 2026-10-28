@@ -5,7 +5,7 @@ The 12 tools in the order of `Tools::NAMES` in the service. Input fields come fr
 ## Common behavior
 
 - Every tool returns a JSON object. A failure returns `{"error": {"code", "message", "http_status", "details"}}` (`errors.rs`).
-- Tools that talk to Studio (everything except `bamburino_capabilities` and `catalog_search`) can return these codes whenever Studio is not ready: `STUDIO_NOT_RUNNING`, `DRIVER_DISABLED`, `DRIVER_UNAUTHORIZED`, `DRIVER_TOKEN_MISSING`, `DRIVER_ERROR`. Mutations can also return `VERSION_MISMATCH`, `BUSY` and `REVISION_CONFLICT`. Bad input returns `INVALID_ARGUMENT`.
+- Tools that talk to Studio (everything except `bamburino_capabilities` and `catalog_search`) can return these codes whenever Studio is not ready: `STUDIO_NOT_RUNNING`, `DRIVER_DISABLED`, `DRIVER_UNAUTHORIZED`, `DRIVER_TOKEN_MISSING`, `DRIVER_ERROR`. Mutations can also return `VERSION_MISMATCH`, `BUSY` and `REVISION_CONFLICT`. A `BUSY` caused by an unresponsive driver carries `details.reason` `driver_timeout` (no answer in time) or `driver_busy` (the driver reported itself busy). Bad input returns `INVALID_ARGUMENT`.
 - Mutations (`studio_set_settings`, `studio_transform_model`, `studio_set_supports`) take `expected_revision`, the `revision` of your last read. On a mismatch nothing is written and `REVISION_CONFLICT` carries `details.reason`, `details.expected`, `details.current` and `details.state`. Slicing tools do not take a revision.
 - `scope` is `project`, `plate` or `object`. `plate` needs `plate_id`, `object` needs `object_id` (ids as returned by `studio_get_state` and `studio_list_models`).
 - Meaning of every error code: README, Errors table.
@@ -16,7 +16,7 @@ Purpose: status of Bamburino, the catalog and the driver. Works with Studio clos
 
 Input: none (`{}`).
 
-Result fields: `bamburino_version`; `catalog` (`studio_version`, `source_revision`, `keys`); `driver` (`status`, which is one of `ready`, `not_running`, `driver_off`, `unauthorized`, `token_missing`, `driver_error`; when `ready` also `app_version`, `build_suffix`, `patch_id`, `version_match`; always `expected_studio_version` and `expected_patch_id`; `message` on `driver_error`); `tools` (the 12 names); `physical_tools` (always `false`).
+Result fields: `bamburino_version`; `catalog` (`studio_version`, `source_revision`, `keys`); `driver` (`status`, which is one of `ready`, `not_running`, `driver_off`, `unauthorized`, `token_missing`, `busy`, `driver_error`; when `ready` also `app_version`, `build_suffix`, `patch_id`, `version_match`; always `expected_studio_version` and `expected_patch_id`; `message` on `busy` and `driver_error`; `busy` means the driver did not answer in time or reported itself busy, typically because a modal dialog is open in Studio); `tools` (the 12 names); `physical_tools` (always `false`).
 
 Errors: none specific; it reports problems in `driver.status` instead of failing.
 
@@ -28,7 +28,7 @@ Purpose: the open project and the `revision` that mutations need.
 
 Input: none (`{}`).
 
-Result fields: `project` (`name`, `path`, `dirty`, `presets_dirty`); `plates[]` (`plate_id`, `name`, `selected`, `locked`); `models` (objects with instances); `presets` (`printer`, `process`, `filaments`); `slice` (`running`, `valid`, `slice_result_id`); `busy` (`modal_open`, `ui_job_running`); `revision`.
+Result fields: `instance` (`session_id`, `app_version`; `session_id` changes when Studio restarts); `project` (`name`, `path`, `dirty`, `presets_dirty`); `plates[]` (`plate_id`, `name`, `selected`, `locked`); `models` (objects with instances); `presets` (`printer`, `process`, `filaments`); `slice` (`running`, `valid`, `slice_result_id`); `busy` (`modal_open`, `ui_job_running`); `revision`. The revision is an integer of at most 2^53 - 1 (JavaScript-safe), it only grows while the service runs, and it takes new values after a service restart: a revision read before a restart does not match afterwards.
 
 Errors: the Studio-not-ready set.
 
@@ -123,7 +123,7 @@ Example output: example pending verification.
 
 ## studio_set_supports
 
-Purpose: enable or configure supports for the project, a plate or an object. It is translated into `studio_set_settings` changes (`enable_support`, `support_type`, `support_threshold_angle`, `support_on_build_plate_only`) and runs through the same pipeline. A plate target becomes object overrides on every object on that plate.
+Purpose: enable or configure supports for the project, a plate or an object. It is translated into `studio_set_settings` changes (`enable_support`, `support_type`, `support_threshold_angle`, `support_on_build_plate_only`) and runs through the same pipeline. A plate target is a plate override (scope `plate`), written with the plate's settings override, not a set of per-object overrides.
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
@@ -138,7 +138,7 @@ Purpose: enable or configure supports for the project, a plate or an object. It 
 
 Result fields: the same as `studio_set_settings` (`applied`, `diff`, `revision`, `dry_run`).
 
-Errors: those of `studio_set_settings`; `INVALID_ARGUMENT` when `style` is given without `type`, when the target id is missing, or when a plate has no objects.
+Errors: those of `studio_set_settings`; `INVALID_ARGUMENT` when `style` is given without `type` or when the target id is missing.
 
 Example request:
 ```json
@@ -152,7 +152,7 @@ Example output: example pending verification.
 
 ## studio_slice
 
-Purpose: start slicing a plate in Studio. It does not modify the project.
+Purpose: start slicing a plate in Studio. It does not modify the project settings, but when `plate_id` is not the selected plate it calls `plate_select` first, which changes the plate selection in Studio and takes an undo snapshot.
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
