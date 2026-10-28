@@ -21,4 +21,8 @@ Only `mcp_server_tests` on Windows; the app build is unaffected. | yes |
 Not created: `0110-snapshot-settings-update.diff`, `0111-snapshot-object-transform.diff` and
 `0112-snapshot-settings-override.diff`. The audit found `take_snapshot` already called before the mutation in
 `settings.update`, `object.transform` and `settings.override` (`docs/driver-audit.md`, Findings 1 and
-"Revision contract"), so PR #12485 needs no change there.
+"Revision contract"), so no patch is needed to add the snapshots: they are present.
+Whether undoing that snapshot actually restores a `settings.update` edit is OPEN (`docs/driver-audit.md`, Open
+questions 1): the snapshot stores Model, Selection, Gizmos and PartPlateList, which may not include the edited
+process preset config, so Ctrl+Z may not revert it. It is to be checked manually in Task 9; until then a client
+must not rely on undo to roll back `settings.update`.

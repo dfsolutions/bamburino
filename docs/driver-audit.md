@@ -3,7 +3,11 @@
 Audited code: `bambulab/BambuStudio` PR #12485 by otarkhan, head `c31e97108e4d1ea137f90a075502e4d4536535fe`, diffed against
 `da8b44ee34dd349f2ae0df3f1cbae366df482354` and frozen in `driver/patches/0001-pr12485-native-mcp-server.diff`
 (41 files, +12995/-108, `patch_id` `1c5c9e30ce52`, historical value for 0001 only; current value in `driver/upstream.toml`). The patch applies cleanly on tag `v02.08.04.57` (`f977235e`).
-Line numbers refer to the PR files at `c31e971`. Unless a path is given, `McpTools.cpp`, `McpAdvanced.inc`, `McpBatch.inc`,
+Line numbers refer to the PR files at `c31e971` (the tree after `0001` only). In the patched clone (after `0100-build-identity.diff` and
+`0120-expose-undo-snapshot.diff`), `McpTools.cpp` lines are shifted: +8 for lines 22-471 of this tree and +9 after
+line 471 (`app_state`), which covers every handler cited below past that point (for example `app.get_capabilities`
+at `:1467` here is `:1476` in the clone; `export_gcode()` at `:748` here is `:757`). `Plater.cpp` line numbers are
+unchanged. Unless a path is given, `McpTools.cpp`, `McpAdvanced.inc`, `McpBatch.inc`,
 `McpDevices.inc`, `McpPreview.inc`, `Plater.cpp` and `GUI_ObjectList.cpp` are in `src/slic3r/GUI/`, and `McpServer.cpp` and `UndoRedo.cpp` are in `src/slic3r/Utils/`.
 
 ## Tool table
@@ -151,7 +155,7 @@ This section checks the draft table "`DriverClient` method → driver tool" in p
 - The copy runs synchronously inside the call. The tool returns an `export_gcode` job that is already `succeeded` with `result{sliceResultId,path,bytes}`, or `failed` with `NATIVE_ERROR`.
 - **Correction to the header strings in the ruling**: at the tag, `; filament used [g] = …` and `; filament used [mm] = …` are commented out (tag `GCode.cpp:2180-2182`). The header that is actually written fills placeholders (tag `GCode.cpp:2399-2404`) with per-filament comma-separated values, formatted `%.2f` (tag `GCode/GCodeProcessor.cpp:655-667`):
   - `; total filament length [mm] : …` (`:760`)
-  - `; total filament volume [cm^3] : …` (`:748`)
+  - `; total filament volume [cm^3] : …` (`:747`)
   - `; total filament weight [g] : …` (`:735`)
 
   For Bambu printers the same header has `; model printing time: …; total estimated time: …` (`:708-711`). The parser must use these strings.
