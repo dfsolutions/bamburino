@@ -9,7 +9,7 @@ use bamburino_core::driver::DriverError;
 use bamburino_core::driver::mock::{MockArrange, MockDriver};
 use bamburino_core::driver::tool::DriverTool;
 use bamburino_core::errors::ToolErrorCode;
-use bamburino_core::tools::{ArrangeArgs, JobArgs, ToolConfig, Tools};
+use bamburino_core::tools::{ArrangeArgs, JobArgs, PlateRenameArgs, ToolConfig, Tools};
 
 fn tools_with(mock: &Arc<MockDriver>, timeout: Duration) -> Tools {
     Tools::new(
@@ -208,6 +208,49 @@ async fn arrange_job_poll_failure_keeps_the_job_id_and_verifies_snapshots() {
     // The caller can still poll the job.
     let s = t.studio_slice_status(JobArgs { job_id: id }).await.unwrap();
     assert_eq!(s["status"], "running");
+}
+
+#[tokio::test]
+async fn arrange_poll_failure_revision_matches_the_state_until_the_job_lands() {
+    let mock = two_plates();
+    mock.fail_tool(DriverTool::JobGet, DriverError::Timeout { after_ms: 5 }, 1);
+    let t = tools_with(&mock, LONG);
+    let rev = revision(&t).await;
+    let e = t.studio_arrange(arrange(1, rev)).await.unwrap_err();
+    assert_eq!(e.details["outcome"], "job_running_unobserved");
+    let returned = e.details["revision"].as_u64().unwrap();
+    // The returned revision is the live one (the refresh ran): it is not
+    // spurious, it is exactly what studio_get_state reports now.
+    assert_eq!(returned, revision(&t).await);
+    let id = e.details["job_id"].as_str().unwrap().to_string();
+    // Let the job finish (the mock completes it on the second poll).
+    let mut status = String::new();
+    for _ in 0..5 {
+        let s = t
+            .studio_slice_status(JobArgs { job_id: id.clone() })
+            .await
+            .unwrap();
+        status = s["status"].as_str().unwrap().to_string();
+        if status != "running" {
+            break;
+        }
+    }
+    assert_ne!(status, "running");
+    // The mock applies the arrange result when the job completes, which is a
+    // real scene change: the returned revision is now stale and a mutation
+    // with it is a true REVISION_CONFLICT (stale_reference), not a spurious
+    // one. The agent re-reads the state and its fresh revision works.
+    let rename = |expected_revision| PlateRenameArgs {
+        plate_index: 0,
+        name: "after arrange".into(),
+        expected_revision,
+    };
+    let stale = t.studio_plate_rename(rename(returned)).await.unwrap_err();
+    assert_eq!(stale.code, ToolErrorCode::RevisionConflict);
+    let fresh = revision(&t).await;
+    assert!(fresh > returned);
+    let r = t.studio_plate_rename(rename(fresh)).await.unwrap();
+    assert!(r["revision"].as_u64().unwrap() > fresh);
 }
 
 #[tokio::test]

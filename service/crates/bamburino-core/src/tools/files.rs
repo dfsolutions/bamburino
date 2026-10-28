@@ -22,7 +22,9 @@
 //! re-validates the directory and the overwrite rule itself; its refusals are
 //! mapped to the same codes. `sha256` is computed by reading the file back;
 //! when the service cannot read it, `sha256` is null with
-//! `hash_unavailable_reason`, never an error (the file was written).
+//! `hash_unavailable_reason`, never an error (the file was written). The
+//! file is streamed in chunks and capped at 2 GiB: above it `sha256` is null
+//! with a reason starting `too_large` (`bytes` is still reported).
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -163,8 +165,32 @@ struct FileFacts {
     unavailable: Option<String>,
 }
 
-fn hash_file(path: &Path) -> std::io::Result<(u64, String)> {
+/// Largest file the service hashes (2 GiB). A written 3MF is far smaller;
+/// above this, `sha256` is null with a `too_large` reason and the size is
+/// still reported.
+const MAX_HASH_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Outcome of [`hash_file`].
+#[derive(Debug, PartialEq, Eq)]
+enum Hashed {
+    Done {
+        bytes: u64,
+        sha256: String,
+    },
+    /// The file is above the cap; `bytes` is what is known of its size.
+    TooLarge {
+        bytes: u64,
+    },
+}
+
+/// Streams the file in 64 KiB chunks (never reads it whole) and stops with
+/// [`Hashed::TooLarge`] as soon as it is above `cap` bytes.
+fn hash_file(path: &Path, cap: u64) -> std::io::Result<Hashed> {
     let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    if len > cap {
+        return Ok(Hashed::TooLarge { bytes: len });
+    }
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 64 * 1024];
     let mut total = 0u64;
@@ -173,27 +199,45 @@ fn hash_file(path: &Path) -> std::io::Result<(u64, String)> {
         if n == 0 {
             break;
         }
-        hasher.update(&buf[..n]);
         total += n as u64;
+        if total > cap {
+            // Grew while being read.
+            return Ok(Hashed::TooLarge { bytes: total });
+        }
+        hasher.update(&buf[..n]);
     }
-    let hex = hasher
+    let sha256 = hasher
         .finalize()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    Ok((total, hex))
+    Ok(Hashed::Done {
+        bytes: total,
+        sha256,
+    })
 }
 
 async fn file_facts(path: PathBuf) -> FileFacts {
+    file_facts_capped(path, MAX_HASH_BYTES).await
+}
+
+async fn file_facts_capped(path: PathBuf, cap: u64) -> FileFacts {
     let read = tokio::task::spawn_blocking(move || {
-        hash_file(&path).map_err(|e| (e, std::fs::metadata(&path).map(|m| m.len()).ok()))
+        hash_file(&path, cap).map_err(|e| (e, std::fs::metadata(&path).map(|m| m.len()).ok()))
     })
     .await;
     match read {
-        Ok(Ok((bytes, hex))) => FileFacts {
+        Ok(Ok(Hashed::Done { bytes, sha256 })) => FileFacts {
             bytes: Some(bytes),
-            sha256: Some(hex),
+            sha256: Some(sha256),
             unavailable: None,
+        },
+        Ok(Ok(Hashed::TooLarge { bytes })) => FileFacts {
+            bytes: Some(bytes),
+            sha256: None,
+            unavailable: Some(format!(
+                "too_large: the file is above the {cap}-byte limit the service hashes; sha256 was not computed"
+            )),
         },
         Ok(Err((e, bytes))) => FileFacts {
             bytes,
@@ -388,6 +432,66 @@ impl Tools {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_file(name: &str, data: &[u8]) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("bamburino-files-{}-{name}", std::process::id()));
+        std::fs::write(&p, data).unwrap();
+        p
+    }
+
+    #[test]
+    fn hash_file_streams_across_chunks_and_matches_a_known_digest() {
+        // 200 000 bytes = three full 64 KiB chunks and a partial one.
+        let data = vec![b'a'; 200_000];
+        let p = temp_file("stream.bin", &data);
+        let want: String = Sha256::digest(&data)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let got = hash_file(&p, MAX_HASH_BYTES).unwrap();
+        std::fs::remove_file(&p).ok();
+        assert_eq!(
+            got,
+            Hashed::Done {
+                bytes: 200_000,
+                sha256: want
+            }
+        );
+        let empty = temp_file("empty.bin", b"");
+        let got = hash_file(&empty, MAX_HASH_BYTES).unwrap();
+        std::fs::remove_file(&empty).ok();
+        assert_eq!(
+            got,
+            Hashed::Done {
+                bytes: 0,
+                sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into()
+            }
+        );
+    }
+
+    #[test]
+    fn hash_file_above_the_cap_is_too_large_and_at_the_cap_is_hashed() {
+        let p = temp_file("cap.bin", &[7u8; 1000]);
+        assert_eq!(
+            hash_file(&p, 999).unwrap(),
+            Hashed::TooLarge { bytes: 1000 }
+        );
+        assert!(matches!(
+            hash_file(&p, 1000).unwrap(),
+            Hashed::Done { bytes: 1000, .. }
+        ));
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[tokio::test]
+    async fn file_facts_over_the_cap_reports_bytes_and_a_too_large_reason() {
+        let p = temp_file("facts.bin", &[1u8; 5000]);
+        let f = file_facts_capped(p.clone(), 4096).await;
+        std::fs::remove_file(&p).ok();
+        assert_eq!(f.bytes, Some(5000));
+        assert_eq!(f.sha256, None);
+        assert!(f.unavailable.unwrap().starts_with("too_large:"));
+    }
 
     #[test]
     fn suffix_check_is_case_insensitive() {

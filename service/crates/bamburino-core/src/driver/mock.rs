@@ -648,9 +648,6 @@ impl MockDriver {
         st.filaments = f;
     }
 
-    /// Simulates the user locking a plate. No driver tool does it. Like the
-    /// driver's `plate.lock` it takes an undo snapshot: the project revision
-    /// moves, plate revisions go stale and the slice result is invalidated.
     /// Test seam: `filament_assign` is accepted (snapshot, recorded index,
     /// normal answer) but the object's extruder is left unchanged, like a
     /// driver that silently ignores the write.
@@ -658,6 +655,9 @@ impl MockDriver {
         self.lock().ignore_filament_assign = ignore;
     }
 
+    /// Simulates the user locking a plate. No driver tool does it. Like the
+    /// driver's `plate.lock` it takes an undo snapshot: the project revision
+    /// moves, plate revisions go stale and the slice result is invalidated.
     pub fn lock_plate(&self, index: u32, locked: bool) {
         let mut st = self.lock();
         if (index as usize) < st.plates.len() {

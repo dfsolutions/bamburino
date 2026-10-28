@@ -151,7 +151,7 @@ fn tool_defs() -> Vec<Tool> {
         ),
         tool_def::<ListFilamentsArgs>(
             "studio_list_filaments",
-            "Reads the project filament slots (1-based, with colour and material) and, when a printer with an AMS is reachable, the AMS trays; a missing AMS is reported as `ams: null` with a reason, never an error.",
+            "Reads the project filament slots (1-based, with colour and material) and, when a printer with an AMS is reachable, the AMS trays; a missing AMS is reported as `ams: null` with a reason, never an error. An explicit `device_id` skips the offline check: an unreachable printer then gives `ams_read_failed`, not `printer_offline`.",
             true,
         ),
         tool_def::<AssignFilamentArgs>(

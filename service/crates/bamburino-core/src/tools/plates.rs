@@ -127,7 +127,9 @@ fn plate_write_error(e: DriverError) -> ToolError {
 /// destination of a delete. `PLATE_NOT_EMPTY`/`target_unavailable` becomes
 /// `PLATE_LOCKED` (with `plate_index`) when the target is locked now, else
 /// `target_not_empty`. A `PLATE_LOCKED` without `plate_index` gets one when
-/// exactly one plate is locked, and `locked_plates` always.
+/// exactly one plate is locked, and `locked_plates` always (with
+/// `reason: "lock_cleared"` when none is locked any more). A
+/// `target_unavailable` refusal without a `target` is returned unchanged.
 async fn refine_refusal(
     drv: &Arc<dyn DriverClient>,
     mut e: ToolError,
@@ -150,7 +152,10 @@ async fn refine_refusal(
         .map(|p| p.index)
         .collect();
     if unavailable {
-        let t = target.unwrap_or(0);
+        // No destination to check (not a delete): keep the original error.
+        let Some(t) = target else {
+            return e;
+        };
         if locked.contains(&t) {
             return plate_locked(t);
         }
@@ -160,6 +165,9 @@ async fn refine_refusal(
     e.details["locked_plates"] = json!(locked);
     if let [only] = locked.as_slice() {
         e.details["plate_index"] = json!(only);
+    } else if locked.is_empty() {
+        // The lock was cleared between the refusal and this re-read.
+        e.details["reason"] = json!("lock_cleared");
     }
     e
 }
@@ -555,6 +563,17 @@ mod tests {
         let e = refine_refusal(&drv, locked, None).await;
         assert_eq!(e.details["plate_index"], 2);
         assert_eq!(e.details["locked_plates"], json!([2]));
+        // No target: the original refusal is returned, plate 0 is not guessed.
+        let e = refine_refusal(&drv, unavailable(), None).await;
+        assert_eq!(e.code, ToolErrorCode::PlateNotEmpty);
+        assert_eq!(e.details, json!({ "reason": "target_unavailable" }));
+        // Lock cleared in the gap: no locked plate on re-read.
+        mock.lock_plate(2, false);
+        let e = refine_refusal(&drv, ToolError::new(ToolErrorCode::PlateLocked, "x"), None).await;
+        assert_eq!(e.code, ToolErrorCode::PlateLocked);
+        assert_eq!(e.details["locked_plates"], json!([]));
+        assert_eq!(e.details["reason"], "lock_cleared");
+        assert!(e.details["plate_index"].is_null());
     }
 
     #[test]

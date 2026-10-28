@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use bamburino_core::detect::FixedProcessProbe;
 use bamburino_core::driver::mock::{MockAms, MockDriver, MockFilament};
-use bamburino_core::driver::{AmsTray, AmsUnit, DeviceSummary};
+use bamburino_core::driver::{AmsTray, AmsUnit, DeviceSummary, DriverError, DriverTool};
 use bamburino_core::errors::ToolErrorCode;
 use bamburino_core::tools::{
     AssignFilamentArgs, ListFilamentsArgs, ToolConfig, Tools, normalize_ams_colour,
@@ -340,4 +340,63 @@ async fn assign_ignored_by_the_driver_is_applied_unverified_not_success() {
     assert_eq!(e.details["outcome"], "applied_unverified");
     assert_eq!(e.details["applied_slot"], 1);
     assert_eq!(mock.assigned_filament_indices(), vec![1]);
+}
+
+#[tokio::test]
+async fn list_filaments_several_selected_devices_is_no_printer_selected() {
+    let mock = Arc::new(MockDriver::new());
+    let mut second = dev(true, true);
+    second.device_id = "d2".into();
+    mock.set_devices(vec![dev(true, true), second]);
+    mock.set_ams(units());
+    let r = tools_with(&mock)
+        .studio_list_filaments(args(None))
+        .await
+        .unwrap();
+    assert!(r["ams"].is_null());
+    assert_eq!(r["ams_unavailable_reason"], "no_printer_selected");
+    assert!(r["device_id"].is_null());
+    assert!(!mock.calls().iter().any(|c| c == "ams_inventory"));
+}
+
+#[tokio::test]
+async fn list_filaments_device_list_failure_gives_ams_read_failed_without_device() {
+    let mock = Arc::new(MockDriver::new());
+    mock.set_devices(vec![dev(true, true)]);
+    mock.set_ams(units());
+    let t = tools_with(&mock);
+    mock.fail_tool(
+        DriverTool::DeviceList,
+        DriverError::Protocol {
+            message: "device list boom".into(),
+        },
+        1,
+    );
+    let r = t.studio_list_filaments(args(None)).await.unwrap();
+    assert!(r["ams"].is_null());
+    assert_eq!(r["ams_unavailable_reason"], "ams_read_failed");
+    assert!(r["device_id"].is_null());
+    assert!(
+        r["ams_error"]
+            .as_str()
+            .unwrap()
+            .contains("device list boom")
+    );
+    assert_eq!(r["project"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn list_filaments_short_filament_type_list_gives_null_material() {
+    let mock = Arc::new(MockDriver::new());
+    mock.set_filaments(vec![
+        fil("A", "PLA", Some("#00AE42")),
+        fil("B", "", Some("#FF0000")),
+    ]);
+    let r = tools_with(&mock)
+        .studio_list_filaments(args(None))
+        .await
+        .unwrap();
+    assert_eq!(r["project"][0]["material"], "PLA");
+    assert!(r["project"][1]["material"].is_null());
+    assert_eq!(r["project"][1]["color_hex"], "#FF0000");
 }

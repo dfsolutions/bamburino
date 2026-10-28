@@ -583,6 +583,7 @@ async fn driver_refusals_after_the_pre_check_keep_their_codes() {
     .await;
     assert_eq!(code(&e), ToolErrorCode::PlateLocked);
     assert_eq!(e.details["locked_plates"], json!([]));
+    assert_eq!(e.details["reason"], "lock_cleared");
     assert!(e.details["plate_index"].is_null());
 
     let e = refused(

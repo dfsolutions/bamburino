@@ -43,7 +43,7 @@ The catalog describes more than the driver can write. The driver accepts only a 
 | summary | `slice_get_state` (estimated time), `preview_get_summary` (move counts, warnings), `export_gcode` to a temporary file whose header gives grams, meters and volume |
 | filament list | `preset_list` (filament), `settings_effective` (`filament_colour`, `filament_type`), `device_list` and `ams_inventory` (optional) |
 | assign filament | `filament_assign` (0-based index; Bamburino slots are 1-based), read back with `settings_effective` |
-| plate create / rename / delete | `plate_create`, `plate_rename`, `plate_delete` (each with `expectedPlateRevision` from a fresh `plate_list`) |
+| plate create / rename / delete | `plate_rename`, `plate_delete` (with `expectedPlateRevision` from a fresh `plate_list`); `plate_create` takes none |
 | move to plate | `plate_move_instance` |
 | arrange | `plate_select` (when needed), `arrange_start`, then `job_get` until the job ends; `model_list` before and after for the move report |
 | save project | `project_save` |

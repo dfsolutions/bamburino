@@ -234,7 +234,7 @@ Purpose: the project filament slots and, when a printer with an AMS is reachable
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `device_id` | string | no | Printer whose AMS to read. Default: the printer selected in Studio. |
+| `device_id` | string | no | Printer whose AMS to read. Default: the printer selected in Studio (exactly one must be selected, otherwise `no_printer_selected`). An explicit `device_id` skips the offline check: an unreachable printer then gives `ams_read_failed`, not `printer_offline`. |
 
 Result fields: `project[]` (`slot`, 1-based; `preset`; `material`; `color_hex`, null when the project colour cannot be parsed); `ams` (array of `unit`, `tray`, `material`, `color_hex`, `remaining`, or `null`); `ams_unavailable_reason` (`no_printer_selected`, `printer_offline`, `no_ams` or `ams_read_failed`; null when `ams` is present); `device_id`; `ams_error` (only when the AMS read failed); `revision`. `ams: null` is a normal answer: ask the user which colours are loaded instead of guessing.
 
@@ -375,7 +375,7 @@ Purpose: save the project as `.3mf` into an allowed folder.
 | `path` | string | yes | Absolute path ending `.3mf` (any case) inside `allowed_dirs`; the folder must exist. A `.gcode.3mf` name is refused. |
 | `overwrite` | boolean | no | Default false. |
 
-Result fields: `path`, `bytes`, `sha256` (lowercase hex; `null` with `hash_unavailable_reason` when the file cannot be read back), `revision`.
+Result fields: `path`, `bytes`, `sha256` (lowercase hex; `null` with `hash_unavailable_reason` when the file cannot be read back, or is above the 2 GiB hash limit: reason starts `too_large`), `revision`.
 
 Errors: `INVALID_ARGUMENT` (`details.reason` `wrong_suffix`), `PATH_NOT_ALLOWED` (`details.reason`), `FILE_EXISTS`, `BUSY`, `VERSION_MISMATCH`, `DRIVER_ERROR` (`details.outcome` `written` when the file was written but the revision refresh failed).
 
@@ -395,7 +395,7 @@ Purpose: export the sliced plate as `.gcode.3mf`, the file Bambu Connect or offi
 | `path` | string | yes | Absolute path ending `.gcode.3mf` (any case) inside `allowed_dirs`; the folder must exist. |
 | `overwrite` | boolean | no | Default false. |
 
-Result fields: `path`, `plate_index`, `slice_result_id`, `bytes`, `sha256` (`null` with `hash_unavailable_reason` when the file cannot be read back), `revision`.
+Result fields: `path`, `plate_index`, `slice_result_id`, `bytes`, `sha256` (`null` with `hash_unavailable_reason` when the file cannot be read back, or is above the 2 GiB hash limit: reason starts `too_large`), `revision`.
 
 Errors: `INVALID_ARGUMENT` (`details.reason` `wrong_suffix`), `PATH_NOT_ALLOWED`, `FILE_EXISTS`, `PLATE_NOT_FOUND` (`details.plate_count`), `NOT_SLICED` (`details.hint` names the slice call), `BUSY`, `VERSION_MISMATCH`, `DRIVER_ERROR`.
 
