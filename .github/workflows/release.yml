@@ -58,7 +58,7 @@ jobs:
             event=$(gh run view "$id" --json event --jq .event)
             case "$event" in push|workflow_dispatch) ;; *) echo "::error::run $id ($wf) was triggered by '$event', only push or workflow_dispatch runs can be released"; exit 1 ;; esac
             path=$(gh api "repos/$GH_REPO/actions/runs/$id" --jq .path)
-            [[ "$path" == ".github/workflows/$wf.yml@"* ]] || { echo "::error::run $id has workflow file '$path', expected .github/workflows/$wf.yml"; exit 1; }
+            [[ "$path" == ".github/workflows/$wf.yml" || "$path" == ".github/workflows/$wf.yml@"* ]] || { echo "::error::run $id has workflow file '$path', expected .github/workflows/$wf.yml"; exit 1; }
             [ "$name" = "$wf" ] || { echo "::error::run $id is workflow '$name', expected '$wf'"; exit 1; }
             [ "$concl" = "success" ] || { echo "::error::run $id ($wf) conclusion is '$concl', expected success"; exit 1; }
             [ "$sha" = "$ref_sha" ] || { echo "::error::run $id ($wf) built $sha, tag $TAG is $ref_sha"; exit 1; }
