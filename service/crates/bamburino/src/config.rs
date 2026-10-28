@@ -193,6 +193,13 @@ impl ConfigDir {
     /// Known limitation: the location comes from the `PROGRAMDATA`
     /// environment variable, not from the Known Folder API.
     pub fn init(&self) -> Result<(), ConfigError> {
+        self.init_with(Config::default())
+    }
+
+    /// [`ConfigDir::init`] with the defaults a NEW `config.toml` is written
+    /// from (`owner_sid` is always set to the installing user). An existing
+    /// configuration is left untouched.
+    pub fn init_with(&self, defaults: Config) -> Result<(), ConfigError> {
         use crate::acl::{OwnerAccess, apply_acl, current_user_sid};
         use crate::secrets::{generate_token, read_secret, write_secret_atomic};
         use crate::secure::{create_protected_root, create_restricted_file, root_problem};
@@ -220,7 +227,7 @@ impl ConfigDir {
         if !cfg_path.exists() {
             let cfg = Config {
                 owner_sid: Some(installer.clone()),
-                ..Config::default()
+                ..defaults
             };
             let mut f = create_restricted_file(&cfg_path, &installer, OwnerAccess::Read)
                 .map_err(|e| io(&cfg_path, e))?;
