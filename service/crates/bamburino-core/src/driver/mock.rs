@@ -171,6 +171,7 @@ struct State {
     arrange: MockArrange,
     write_files: bool,
     assigned_indices: Vec<u32>,
+    ignore_filament_assign: bool,
     overwrite_flags: Vec<bool>,
     // export_gcode
     gcode_header: bool,
@@ -493,6 +494,7 @@ impl MockDriver {
                 arrange: MockArrange::Shift([10.0, 0.0, 0.0]),
                 write_files: true,
                 assigned_indices: Vec::new(),
+                ignore_filament_assign: false,
                 overwrite_flags: Vec::new(),
                 gcode_header: true,
                 exported: Vec::new(),
@@ -649,6 +651,13 @@ impl MockDriver {
     /// Simulates the user locking a plate. No driver tool does it. Like the
     /// driver's `plate.lock` it takes an undo snapshot: the project revision
     /// moves, plate revisions go stale and the slice result is invalidated.
+    /// Test seam: `filament_assign` is accepted (snapshot, recorded index,
+    /// normal answer) but the object's extruder is left unchanged, like a
+    /// driver that silently ignores the write.
+    pub fn set_ignore_filament_assign(&self, ignore: bool) {
+        self.lock().ignore_filament_assign = ignore;
+    }
+
     pub fn lock_plate(&self, index: u32, locked: bool) {
         let mut st = self.lock();
         if (index as usize) < st.plates.len() {
@@ -1437,8 +1446,10 @@ impl DriverClient for MockDriver {
         };
         let preset = slot.preset.clone();
         st.take_snapshot();
-        st.objects[o].extruder = filament_index + 1;
-        st.objects[o].extruder_assigned = true;
+        if !st.ignore_filament_assign {
+            st.objects[o].extruder = filament_index + 1;
+            st.objects[o].extruder_assigned = true;
+        }
         st.assigned_indices.push(filament_index);
         Ok(FilamentAssignment {
             object_id: object_id.to_string(),

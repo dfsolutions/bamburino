@@ -314,3 +314,30 @@ async fn assign_while_modal_is_busy_without_a_write() {
     assert_eq!(e.code, ToolErrorCode::Busy);
     no_assign_call(&mock);
 }
+
+#[tokio::test]
+async fn assign_on_a_locked_plate_is_plate_locked_and_records_nothing() {
+    let mock = Arc::new(MockDriver::new());
+    two_presets(&mock);
+    mock.lock_plate(0, true);
+    let t = tools_with(&mock);
+    let rev = revision(&t).await;
+    let e = t.studio_assign_filament(assign(2, rev)).await.unwrap_err();
+    assert_eq!(e.code, ToolErrorCode::PlateLocked);
+    assert!(mock.assigned_filament_indices().is_empty());
+    assert_eq!(mock.extruder_of("obj-1"), 1);
+}
+
+#[tokio::test]
+async fn assign_ignored_by_the_driver_is_applied_unverified_not_success() {
+    let mock = Arc::new(MockDriver::new());
+    two_presets(&mock);
+    mock.set_ignore_filament_assign(true);
+    let t = tools_with(&mock);
+    let rev = revision(&t).await;
+    let e = t.studio_assign_filament(assign(2, rev)).await.unwrap_err();
+    assert_eq!(e.code, ToolErrorCode::DriverError);
+    assert_eq!(e.details["outcome"], "applied_unverified");
+    assert_eq!(e.details["applied_slot"], 1);
+    assert_eq!(mock.assigned_filament_indices(), vec![1]);
+}

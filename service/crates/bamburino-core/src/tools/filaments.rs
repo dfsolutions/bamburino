@@ -57,6 +57,23 @@ fn split_list(raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// Stable part of the driver's refusal for an object on a locked plate
+/// (`McpTools.cpp`, `filament_assign`: "Unlock every plate containing the
+/// object first"); matched by substring so a wording tweak around it is fine.
+const LOCKED_PLATE_MARKER: &str = "Unlock every plate";
+
+fn assign_error(e: DriverError) -> ToolError {
+    if let DriverError::InvalidParams { message } = &e
+        && message.contains(LOCKED_PLATE_MARKER)
+    {
+        return ToolError::new(
+            ToolErrorCode::PlateLocked,
+            format!("{message}. Unlock the plate in Bambu Studio and retry; nothing was changed."),
+        );
+    }
+    write_error(e)
+}
+
 /// Extruder (1-based slot) of an object as the driver reports it.
 async fn extruder_slot(
     drv: &dyn crate::driver::DriverClient,
@@ -84,7 +101,6 @@ type AmsRead = (Option<String>, Value, Value, Option<String>);
 impl Tools {
     /// Assigns a project filament slot (1-based) to an object.
     pub async fn studio_assign_filament(&self, a: AssignFilamentArgs) -> Result<Value, ToolError> {
-        self.revision.touch_client();
         let a = &a;
         let ((previous, preset), applied, revision) = self
             .guarded_mutation_with(
@@ -122,7 +138,7 @@ impl Tools {
                     let done = drv
                         .filament_assign(&a.object_id, a.filament_slot - 1)
                         .await
-                        .map_err(write_error)?;
+                        .map_err(assign_error)?;
                     Ok((previous, done.preset))
                 },
                 || async {
@@ -140,7 +156,7 @@ impl Tools {
             return Err(ToolError::new(
                 ToolErrorCode::DriverError,
                 format!(
-                    "the driver accepted the assignment but reports slot {applied}, not {}",
+                    "the driver accepted the assignment but reports slot {applied}, not {}; the project revision has moved, so read `studio_get_state` again before retrying",
                     a.filament_slot
                 ),
             )
