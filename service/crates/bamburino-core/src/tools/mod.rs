@@ -96,6 +96,16 @@ impl Tools {
         &self.revision
     }
 
+    /// Starts the revision poller on this tool set's driver; it polls only
+    /// while clients are active. Stop it with `revision_state().stop_poller()`.
+    pub fn start_poller(&self) -> tokio::task::JoinHandle<()> {
+        self.revision.clone().spawn_poller(
+            self.driver.clone(),
+            self.cfg.poll_every,
+            self.cfg.idle_after,
+        )
+    }
+
     pub fn config(&self) -> &ToolConfig {
         &self.cfg
     }
