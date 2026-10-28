@@ -256,19 +256,19 @@ fn root_problem_flags_inherited_or_foreign_owned_dirs() {
 
 #[cfg(windows)]
 #[test]
+#[ignore = "requires an elevated session"]
 fn init_locks_root_tmp_and_files() {
     use bamburino::secure::{root_problem, security_sddl};
     let tmp = tempfile::tempdir().unwrap();
     let dir = ConfigDir(tmp.path().join("Bamburino"));
-    match dir.init() {
-        Ok(()) => {}
-        Err(e) => {
-            // Creating a root owned by Administrators needs elevation.
-            let msg = e.to_string();
-            assert!(msg.contains("elevated"), "{msg}");
-            eprintln!("skipped: not elevated ({msg})");
-            return;
-        }
+    if let Err(e) = dir.init() {
+        // Error 1307 (invalid owner) means the session is not elevated.
+        let hint = if e.to_string().contains("1307") {
+            " (not elevated: run from an Administrator prompt)"
+        } else {
+            ""
+        };
+        panic!("init failed{hint}: {e}");
     }
     assert!(root_problem(&dir.0).is_none());
     let root = security_sddl(&dir.0).unwrap();
@@ -317,8 +317,13 @@ fn root_sddl_dacl_is_protected_and_minimal() {
     want.sort();
     assert_eq!(trustees, want, "{got}");
     assert!(got.contains("D:P") && got.contains("OICI"), "{got}");
-    // Owned by the current user, not SYSTEM/Administrators: must be refused.
-    assert!(root_problem(&root).unwrap().contains("owner"));
+    // Refused only when the real owner is neither Administrators nor SYSTEM
+    // (an elevated session creates it as BUILTIN\Administrators).
+    if got.starts_with("O:BA") || got.starts_with("O:SY") {
+        assert_eq!(root_problem(&root), None, "{got}");
+    } else {
+        assert!(root_problem(&root).unwrap().contains("owner"), "{got}");
+    }
 }
 
 #[cfg(windows)]
@@ -341,4 +346,23 @@ fn tmp_dir_dacl_gives_user_and_service_modify() {
         assert!(ace.contains("0x1301bf") && ace.contains("OICI"), "{ace}");
     }
     assert_eq!(got.matches(";;;").count(), 4, "{got}");
+}
+
+#[cfg(windows)]
+#[test]
+fn root_problem_rejects_reparse_point() {
+    let tmp = tempfile::tempdir().unwrap();
+    let target = tmp.path().join("real");
+    std::fs::create_dir(&target).unwrap();
+    let link = tmp.path().join("link");
+    let st =
+        std::process::Command::new(std::env::var("SystemRoot").unwrap() + r"\System32\cmd.exe")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
+            .output()
+            .unwrap();
+    assert!(st.status.success(), "mklink /J failed");
+    let p = bamburino::secure::root_problem(&link).unwrap();
+    assert!(p.contains("reparse"), "{p}");
 }

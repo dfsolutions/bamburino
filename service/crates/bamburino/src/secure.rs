@@ -131,6 +131,15 @@ pub fn security_sddl(path: &Path) -> io::Result<String> {
 pub fn root_problem(path: &Path) -> Option<String> {
     #[cfg(windows)]
     {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        match std::fs::symlink_metadata(path) {
+            Ok(m) if m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 => {
+                return Some("it is a reparse point (symlink or junction)".to_owned());
+            }
+            Ok(_) => {}
+            Err(e) => return Some(format!("cannot inspect it: {e}")),
+        }
         match security_sddl(path) {
             Err(e) => Some(format!("cannot read its security descriptor: {e}")),
             Ok(sddl) => {
